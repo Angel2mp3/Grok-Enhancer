@@ -125,7 +125,7 @@ A dedicated floating panel for Grok's `/imagine` video and image generation — 
 | Option                       | Description                                                                                                                                                           |
 | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Enabled / Disabled**       | Master toggle for all Imagine Menu interception                                                                                                                       |
-| **Extend Video Length**      | Bypass the extend-video-length limit (1–30 seconds) — injected into each chat POST request before it's sent                                                           |
+| **Extend Video Length Bypass**      | Bypass the extend-video-length limit (1–30 seconds) — injected into each chat POST request before it's sent                                                           |
 | **Auto-Retry on Moderation** | Automatically re-submits the prompt when Grok flags or blocks a generation                                                                                            |
 | **Smart Retry**              | On each retry, rewrites the prompt using a different obfuscation strategy (leet speak, zero-width character insertion, synonym swaps) to slip past moderation filters |
 | **Persistent Prompt**        | Saves your last prompt before every retry — if Grok clears the input box after a block, the prompt is automatically restored                                          |
