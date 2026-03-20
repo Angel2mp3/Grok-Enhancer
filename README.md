@@ -9,6 +9,7 @@
 </p>
 
 ---
+### NOTE: It seems Grok has currently patched the video length extender bypass and the rate limit viewer, will try to fix this but unknown if it will be
 
 ### ⬇️ One-Click Install
 
