@@ -3510,7 +3510,17 @@
         const now = Date.now();
         if (now - _ge_imLastModScan < 400) return;
         _ge_imLastModScan = now;
-        if (!ge_findModerationSignal()) return;
+        if (!ge_findModerationSignal()) {
+            // Reset retry counter when moderation clears (new generation succeeded or
+            // user started fresh) so subsequent prompts can retry from zero again.
+            // Guard with a cooldown to avoid resetting during the brief gap between
+            // a retry click and the moderation signal reappearing.
+            if (ge_imRetryCount > 0 && now - ge_imLastRetryTime > 5000) {
+                ge_imRetryCount = 0;
+                ge_updateImStatus();
+            }
+            return;
+        }
 
         const btn = document.querySelector('button[aria-label="Make video"]')
             || document.querySelector('button[aria-label="Send"]')
@@ -4283,11 +4293,11 @@
         const retRow = document.createElement('div'); retRow.className = 'im-row';
         const retLbl = document.createElement('span'); retLbl.className = 'im-lbl'; retLbl.textContent = 'Max Retries';
         const retInp = document.createElement('input');
-        retInp.type = 'number'; retInp.min = '1'; retInp.max = '20'; retInp.value = ge_imMaxRetries;
+        retInp.type = 'number'; retInp.min = '1'; retInp.max = '50'; retInp.value = ge_imMaxRetries;
         retInp.style.cssText = 'width:42px;padding:2px 4px;background:#222;color:#fff;border:1px solid #444;border-radius:4px;font-size:11px;text-align:center;';
         retInp.addEventListener('change', () => {
             const v = parseInt(retInp.value);
-            if (v >= 1 && v <= 20) { ge_imMaxRetries = v; setState('GrokEnhancer_IM_MaxRetries', v); }
+            if (v >= 1 && v <= 50) { ge_imMaxRetries = v; setState('GrokEnhancer_IM_MaxRetries', v); }
         });
         retRow.appendChild(retLbl); retRow.appendChild(retInp);
         section.appendChild(retRow);
