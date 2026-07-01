@@ -3,9 +3,9 @@
 **<p align="center"> The all-in-one Grok userscript that you could ever need! </p>**
 
 <p align="center">
-  <a href="https://github.com/Angel2mp3"><img src="https://img.shields.io/badge/Version-1.0-007EC6?style=for-the-badge&logo=github&logoColor=white" alt="Version"/></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-22863A?style=for-the-badge" alt="MIT License"/></a>
-  <a href="https://ko-fi.com/angelsoftware"><img src="https://img.shields.io/badge/Support_on-Ko--fi-FF5E5B?style=for-the-badge&logo=ko-fi&logoColor=white" alt="Support on Ko-fi"/></a>
+  <a href="https://github.com/Angel2mp3"><img src="https://img.shields.io/badge/Version-1.0-0D47A1?style=for-the-badge&logo=github&logoColor=white" alt="Version"/></a>
+  <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fuserscript-install-tracker.vercel.app%2Fapi%2Fbadge%3Frepo%3DGrokEnhancer&style=for-the-badge&color=4A148C" alt="Installs"/>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-424242?style=for-the-badge" alt="MIT License"/></a>
 </p>
 
 ---
@@ -16,8 +16,10 @@
 > Requires a userscript manager like [Violentmonkey](https://violentmonkey.github.io/get-it/) or [Tampermonkey](https://www.tampermonkey.net/) (Chrome / Edge / Firefox / Safari)
 
 <p align="center">
-  <a href="https://github.com/Angel2mp3/Grok-Enhancer/raw/main/Grok-Enhancer.user.js">
-    <img src="https://img.shields.io/badge/⬇️_Install_Grok_Enhancer-Click_Here-4CAF50?style=for-the-badge" alt="Install Grok Enhancer"/>
+  <a href="https://github.com/Angel2mp3/Grok-Enhancer/actions">
+  </a>
+  <a href="https://userscript-install-tracker.vercel.app/install/GrokEnhancer.user.js">
+    <img src="https://img.shields.io/badge/⬇️_Install_Grok_Enhancer-Click_Here-B71C1C?style=for-the-badge" alt="Install Grok Enhancer"/>
   </a>
 </p>
 
