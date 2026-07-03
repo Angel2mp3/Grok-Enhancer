@@ -1,9 +1,11 @@
 // ==UserScript==
 // @name         Grok Enhancer
 // @namespace    https://grok.com/
-// @version      1.0
+// @version      2.0
 // @description  All-in-one Grok enhancement
 // @author       Angel
+// @homepageURL  https://angelmakes.software/
+// @source       https://github.com/Angel2mp3
 // @match        https://grok.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=grok.com
 // @updateURL    https://github.com/Angel2mp3/Grok-Enhancer/raw/main/Grok-Enhancer.user.js
@@ -117,17 +119,29 @@
 
     // ── Feature toggles ──────────────────────────────────────────
     let featureLogo        = getState('GrokEnhancer_Logo', true);
-    let featureLinks       = getState('GrokEnhancer_Links', true);
+    let featureLinks       = getState('GrokEnhancer_Links', false);
     let featureDeMod       = getState('GrokDeModEnabled', true);
     let featureRateLimit   = getState('GrokEnhancer_RateLimit', true);
     let featureDebug       = getState('GrokDeModDebug', false);
     let featureHideShare   = getState('GrokEnhancer_HideShare', false);
-    let featureDeleter     = getState('GrokEnhancer_Deleter', true);
     let featureHidePopups  = getState('GrokEnhancer_HidePopups', false);
-    let featureHidePremium = getState('GrokEnhancer_HidePremium', false);
+    let featureHidePremium = getState('GrokEnhancer_HidePremium', true);
     let featureHideHeavy   = getState('GrokEnhancer_HideHeavy', false);
+    let featureHideExpert  = getState('GrokEnhancer_HideExpert', false);
+    let featureHideAuto    = getState('GrokEnhancer_HideAuto', false);
+    let featureHideFollowups = getState('GrokEnhancer_HideFollowups', false);
+    let featureHideBuildNav  = getState('GrokEnhancer_HideBuildNav', false);
+    let featureHideImagineNav = getState('GrokEnhancer_HideImagineNav', false);
+    let featureHideSkillsNav = getState('GrokEnhancer_HideSkillsNav', false);
     let featureAutoPrivate = getState('GrokEnhancer_AutoPrivate', false);
-    let featureStreamer    = getState('GrokEnhancer_Streamer', false);
+    let featurePrivacyMode    = getState('GrokEnhancer_Streamer', false);
+    let featurePrivacyBlur    = getState('GrokEnhancer_PrivacyBlur', false);
+    let featureHideUsername   = getState('GrokEnhancer_HideUsername', false);
+    let featureHideEmail      = getState('GrokEnhancer_HideEmail', false);
+    let featureHideAvatar     = getState('GrokEnhancer_HideAvatar', false);
+    let featureAutoLock       = getState('GrokEnhancer_AutoLock', false);
+    let ge_autoLockMinutes    = getState('GrokEnhancer_AutoLockMinutes', 5);
+    let featurePinLock        = getState('GrokEnhancer_PinLock', false);
     let ge_activeStyleId   = getState('GrokEnhancer_ActiveStyleId', null);
 
     // ── Imagine Menu state ──
@@ -157,7 +171,10 @@
     function logError(...a) { console.error('[GrokEnhancer]', ...a); }
 
     // ── FAB triple-click hide/show ──────────────────────────────
-    let _ge_fabHidden = getState('GrokEnhancer_FabHidden', false);
+    // Hidden state only survives a refresh when featureFabStayHidden is on; otherwise
+    // the FAB always starts visible, even if it was hidden last session.
+    let featureFabStayHidden = getState('GrokEnhancer_FabStayHidden', false);
+    let _ge_fabHidden = featureFabStayHidden && getState('GrokEnhancer_FabHidden', false);
     let _ge_fabClicks = [];
     const GE_TRIPLE_CLICK_MS = 500; // max time window for 3 clicks
 
@@ -191,12 +208,18 @@
     let _logoSvgObserver = null;
 
     let lastUrl = location.href;
-    new MutationObserver(() => {
+    const _ge_urlChangeObserver = new MutationObserver(() => {
         if (location.href !== lastUrl) {
             lastUrl = location.href;
             logoReplaced = false;
+            if (featurePrivacyMode) {
+                ge_maskPrivacyTitle();
+                // New route may have rendered fresh sidebar/command-menu items.
+                ge_rescanPrivacyFull();
+            }
         }
-    }).observe(document, { subtree: true, childList: true });
+    });
+    _ge_urlChangeObserver.observe(document, { subtree: true, childList: true });
 
     function isGreetingLogo(svg) {
         let el = svg.parentElement;
@@ -525,86 +548,94 @@
         return out;
     }
 
-    async function handleFetchResponse(original_response, url, requestArgs) {
-        const response = original_response.clone();
-        if (!response.ok) return original_response;
-        const ct = response.headers.get('Content-Type')?.toLowerCase() || '';
-
+    // Tracks the active conversation ID from either the initial GET request
+    // or the first response that reveals it, and caches the auth headers
+    // needed later for the DeMod recovery re-fetch.
+    function ge_trackConversationId(url, requestArgs) {
         const convGetMatch = url.match(/\/rest\/app-chat\/conversation\/([a-f0-9-]+)$/i);
         if (convGetMatch && requestArgs?.method === 'GET') {
             demodInitCache = { headers: new Headers(requestArgs.headers), credentials: requestArgs.credentials || 'include' };
             if (!currentConversationId) currentConversationId = convGetMatch[1];
         }
         if (!currentConversationId) { const id = extractConversationIdFromUrl(url); if (id) currentConversationId = id; }
+    }
 
-        // ── SSE stream processing ────────────────────────────────
-        if (ct.includes('text/event-stream')) {
-            const reader = response.body.getReader();
-            const stream = new ReadableStream({
-                async start(controller) {
-                    let buffer = '';
-                    let currentEvent = { data: '', type: 'message', id: null };
-                    try {
-                        while (true) {
-                            const { done, value } = await reader.read();
-                            if (done) {
-                                if (buffer.trim() && (buffer.startsWith('{') || buffer.startsWith('['))) {
-                                    try { let j = JSON.parse(buffer); j = await processPotentialModeration(j, 'SSE-Final'); controller.enqueue(_encoder.encode(`data: ${JSON.stringify(j)}\n\n`)); }
-                                    catch (_) { controller.enqueue(_encoder.encode(`data: ${buffer}\n\n`)); }
-                                } else if (buffer.trim()) {
-                                    controller.enqueue(_encoder.encode(`data: ${buffer}\n\n`));
-                                } else if (currentEvent.data) {
-                                    try { let j = JSON.parse(currentEvent.data); j = await processPotentialModeration(j, 'SSE-Event'); controller.enqueue(_encoder.encode(`data: ${JSON.stringify(j)}\n\n`)); }
-                                    catch (_) { controller.enqueue(_encoder.encode(`data: ${currentEvent.data}\n\n`)); }
-                                }
-                                controller.close(); break;
+    function ge_handleSSEResponse(response) {
+        const reader = response.body.getReader();
+        const stream = new ReadableStream({
+            async start(controller) {
+                let buffer = '';
+                let currentEvent = { data: '', type: 'message', id: null };
+                try {
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) {
+                            if (buffer.trim() && (buffer.startsWith('{') || buffer.startsWith('['))) {
+                                try { let j = JSON.parse(buffer); j = await processPotentialModeration(j, 'SSE-Final'); controller.enqueue(_encoder.encode(`data: ${JSON.stringify(j)}\n\n`)); }
+                                catch (_) { controller.enqueue(_encoder.encode(`data: ${buffer}\n\n`)); }
+                            } else if (buffer.trim()) {
+                                controller.enqueue(_encoder.encode(`data: ${buffer}\n\n`));
+                            } else if (currentEvent.data) {
+                                try { let j = JSON.parse(currentEvent.data); j = await processPotentialModeration(j, 'SSE-Event'); controller.enqueue(_encoder.encode(`data: ${JSON.stringify(j)}\n\n`)); }
+                                catch (_) { controller.enqueue(_encoder.encode(`data: ${currentEvent.data}\n\n`)); }
                             }
-                            buffer += _decoder.decode(value, { stream: true });
-                            let lines = buffer.split('\n');
-                            buffer = lines.pop() || '';
-                            for (const line of lines) {
-                                if (line.trim() === '') {
-                                    if (currentEvent.data) {
-                                        if (currentEvent.data.startsWith('{') || currentEvent.data.startsWith('[')) {
-                                            try {
-                                                let j = JSON.parse(currentEvent.data);
-                                                if (j.conversation_id && !currentConversationId) currentConversationId = j.conversation_id;
-                                                j = await processPotentialModeration(j, 'SSE');
-                                                controller.enqueue(_encoder.encode(`data: ${JSON.stringify(j)}\n\n`));
-                                            } catch (_) { controller.enqueue(_encoder.encode(`data: ${currentEvent.data}\n\n`)); }
-                                        } else {
-                                            controller.enqueue(_encoder.encode(`data: ${currentEvent.data}\n\n`));
-                                        }
+                            controller.close(); break;
+                        }
+                        buffer += _decoder.decode(value, { stream: true });
+                        let lines = buffer.split('\n');
+                        buffer = lines.pop() || '';
+                        for (const line of lines) {
+                            if (line.trim() === '') {
+                                if (currentEvent.data) {
+                                    if (currentEvent.data.startsWith('{') || currentEvent.data.startsWith('[')) {
+                                        try {
+                                            let j = JSON.parse(currentEvent.data);
+                                            if (j.conversation_id && !currentConversationId) currentConversationId = j.conversation_id;
+                                            j = await processPotentialModeration(j, 'SSE');
+                                            controller.enqueue(_encoder.encode(`data: ${JSON.stringify(j)}\n\n`));
+                                        } catch (_) { controller.enqueue(_encoder.encode(`data: ${currentEvent.data}\n\n`)); }
+                                    } else {
+                                        controller.enqueue(_encoder.encode(`data: ${currentEvent.data}\n\n`));
                                     }
-                                    currentEvent = { data: '', type: 'message', id: null };
-                                } else if (line.startsWith('data:')) {
-                                    currentEvent.data += (currentEvent.data ? '\n' : '') + line.substring(5).trim();
-                                } else if (line.startsWith('event:')) {
-                                    currentEvent.type = line.substring(6).trim();
-                                } else if (line.startsWith('id:')) {
-                                    currentEvent.id = line.substring(3).trim();
                                 }
+                                currentEvent = { data: '', type: 'message', id: null };
+                            } else if (line.startsWith('data:')) {
+                                currentEvent.data += (currentEvent.data ? '\n' : '') + line.substring(5).trim();
+                            } else if (line.startsWith('event:')) {
+                                currentEvent.type = line.substring(6).trim();
+                            } else if (line.startsWith('id:')) {
+                                currentEvent.id = line.substring(3).trim();
                             }
                         }
-                    } catch (e) { controller.error(e); } finally { reader.releaseLock(); }
-                }
-            });
-            return new Response(stream, { status: response.status, statusText: response.statusText, headers: new Headers(response.headers) });
-        }
+                    }
+                } catch (e) { controller.error(e); } finally { reader.releaseLock(); }
+            }
+        });
+        return new Response(stream, { status: response.status, statusText: response.statusText, headers: new Headers(response.headers) });
+    }
 
-        // ── JSON response processing ─────────────────────────────
-        if (ct.includes('application/json')) {
-            try {
-                const text = await response.text();
-                let json = JSON.parse(text);
-                if (json.conversation_id && !currentConversationId) currentConversationId = json.conversation_id;
-                json = await processPotentialModeration(json, 'Fetch');
-                const body = JSON.stringify(json);
-                const nh = new Headers(response.headers);
-                if (nh.has('content-length')) nh.set('content-length', _encoder.encode(body).byteLength.toString());
-                return new Response(body, { status: response.status, statusText: response.statusText, headers: nh });
-            } catch (_) { return original_response; }
-        }
+    async function ge_handleJSONResponse(response, original_response) {
+        try {
+            const text = await response.text();
+            let json = JSON.parse(text);
+            if (json.conversation_id && !currentConversationId) currentConversationId = json.conversation_id;
+            json = await processPotentialModeration(json, 'Fetch');
+            const body = JSON.stringify(json);
+            const nh = new Headers(response.headers);
+            if (nh.has('content-length')) nh.set('content-length', _encoder.encode(body).byteLength.toString());
+            return new Response(body, { status: response.status, statusText: response.statusText, headers: nh });
+        } catch (_) { return original_response; }
+    }
+
+    async function handleFetchResponse(original_response, url, requestArgs) {
+        const response = original_response.clone();
+        if (!response.ok) return original_response;
+        const ct = response.headers.get('Content-Type')?.toLowerCase() || '';
+
+        ge_trackConversationId(url, requestArgs);
+
+        if (ct.includes('text/event-stream')) return ge_handleSSEResponse(response);
+        if (ct.includes('application/json')) return ge_handleJSONResponse(response, original_response);
         return original_response;
     }
 
@@ -621,6 +652,19 @@
 
         // ── Custom Response Style: prepend instructions to the user message ──
         const isChatPost = method === 'POST' && url.includes('/rest/app-chat/conversation');
+
+        // ── Rate Limit: detect model from outgoing chat request for local usage tracking ──
+        const isRateLimitTrackable = method === 'POST' &&
+            (url.includes('/rest/app-chat/conversations/new') || (url.includes('/responses') && url.includes('/rest/app-chat/conversations/')));
+        let rl_pendingModel = null;
+        if (featureRateLimit && isRateLimitTrackable) {
+            try {
+                let rlBodyText = null;
+                if (typeof requestArgs.body === 'string') rlBodyText = requestArgs.body;
+                else if (isReqObj) { const rlClone = input.clone(); rlBodyText = await rlClone.text(); }
+                if (rlBodyText) rl_pendingModel = rl_getModelFromBody(JSON.parse(rlBodyText));
+            } catch (_) {}
+        }
         if (ge_activeStyleId && isChatPost) {
             try {
                 const styles = ge_getCustomStyles();
@@ -723,21 +767,11 @@
             return resp;
         }
 
-        // ── Sniff file DELETE endpoint so ge_deleteFile can reuse the real URL ──
-        if (method === 'DELETE' && (url.includes('/file') || url.includes('/files'))) {
-            try {
-                // Store a template with <id> replacing the last path segment (the file ID)
-                const parts = url.split('/');
-                const lastSeg = parts[parts.length - 1];
-                if (/^[0-9a-f-]{20,}$/i.test(lastSeg) || /^\d+$/.test(lastSeg)) {
-                    parts[parts.length - 1] = '<id>';
-                    _ge_sniffedDeleteEndpoint = parts.join('/');
-                    logDebug('[Deleter] sniffed DELETE template:', _ge_sniffedDeleteEndpoint);
-                }
-            } catch (_) {}
+        if (!featureDeMod) {
+            const p0 = _originalFetch.call(this, input, requestArgs);
+            if (rl_pendingModel) rl_trackUsageAndLimit(rl_pendingModel, p0);
+            return p0;
         }
-
-        if (!featureDeMod) return _originalFetch.call(this, input, requestArgs);
         if (!url.includes('/rest/app-chat/')) return _originalFetch.call(this, input, requestArgs);
 
         if (method === 'POST') {
@@ -747,7 +781,9 @@
                 const hdrs = requestArgs.headers || (isReqObj ? input.headers : null);
                 if (!demodInitCache && hdrs) demodInitCache = { headers: new Headers(hdrs), credentials: requestArgs.credentials || (isReqObj ? input.credentials : 'include') };
             }
-            return _originalFetch.call(this, input, requestArgs);
+            const p1 = _originalFetch.call(this, input, requestArgs);
+            if (rl_pendingModel) rl_trackUsageAndLimit(rl_pendingModel, p1);
+            return p1;
         }
         try {
             const resp = await _originalFetch.call(this, input, requestArgs);
@@ -803,21 +839,34 @@
         }
     });
 
+    // Shared "get-or-create a <style> element, set/clear its CSS" toggle used by every
+    // CSS-only hide feature below (popups, premium upsells, model dropdown, privacy).
+    function ge_applyToggleStyle(styleId, on, css) {
+        let style = document.getElementById(styleId);
+        if (on) {
+            if (!style) {
+                style = document.createElement('style');
+                style.id = styleId;
+                document.head.appendChild(style);
+            }
+            style.textContent = css;
+        } else if (style) {
+            style.remove();
+        }
+    }
+
     // ══════════════════════════════════════════════════════════════
     //  3c. Hide Satisfaction / Feedback Popups
     // ══════════════════════════════════════════════════════════════
     const POPUP_STYLE_ID = 'ge-hide-popups-css';
 
     function ge_applyPopupHideCSS(on) {
-        let style = document.getElementById(POPUP_STYLE_ID);
-        if (on) {
-            if (!style) {
-                style = document.createElement('style');
-                style.id = POPUP_STYLE_ID;
-                document.head.appendChild(style);
-            }
-            // Target the satisfaction popup, Think Harder suggestion, Connect X banner, and notification toast
-            style.textContent = `
+        // Target the satisfaction popup, Think Harder suggestion, Connect X banner, notification toast, and Grok Build promo
+        ge_applyToggleStyle(POPUP_STYLE_ID, on, `
+                /* "Grok Build" beta CLI install promo card (dismissible) */
+                div[class*="promo-card"]:has(button[aria-label="Dismiss"]) {
+                    display: none !important;
+                }
                 /* Satisfaction / feedback popup */
                 div.rounded-3xl.backdrop-blur-lg.border.bg-input {
                     display: none !important;
@@ -856,10 +905,7 @@
                 span:has([data-sparkle-wrapper]) {
                     display: none !important;
                 }
-            `;
-        } else if (style) {
-            style.remove();
-        }
+            `);
     }
 
     // ══════════════════════════════════════════════════════════════
@@ -868,20 +914,18 @@
     const PREMIUM_STYLE_ID = 'ge-hide-premium-css';
 
     function ge_applyPremiumHideCSS(on) {
-        let style = document.getElementById(PREMIUM_STYLE_ID);
-        if (on) {
-            if (!style) {
-                style = document.createElement('style');
-                style.id = PREMIUM_STYLE_ID;
-                document.head.appendChild(style);
-            }
-            style.textContent = `
+        ge_applyToggleStyle(PREMIUM_STYLE_ID, on, `
                 /* SuperGrok upsell — small fixed bottom-right banner */
                 div.upsell-small {
                     display: none !important;
                 }
                 /* SuperGrok upsell — inline wider banner with gradient */
                 div[role="button"].rounded-3xl.bg-black.text-white.dark:has(button:is([aria-label="Hide upsell banner"], :has(> span > svg))) {
+                    display: none !important;
+                }
+                /* SuperGrok upsell — sidebar-footer banner (rotates message: "Fewer rate
+                   limits, more capabilities" / "Customize your team of agents" / etc.) */
+                div.shrink-0.border-t.border-border:has(> div[role="button"].bg-black.text-white.dark > button) {
                     display: none !important;
                 }
                 /* SuperGrok / Get SuperGrok sidebar row — matched by logo SVG + Upgrade button */
@@ -910,10 +954,7 @@
                 [role="menuitem"]:has(svg[viewBox="0 0 35 33"]) {
                     display: none !important;
                 }
-            `;
-        } else if (style) {
-            style.remove();
-        }
+            `);
     }
 
     function ge_dismissPremium() {
@@ -923,6 +964,15 @@
             if (/supergrok|unlock|try free|fewer rate limits/i.test(el.textContent)) {
                 el.style.setProperty('display', 'none', 'important');
                 logDebug('[HidePremium] Hidden SuperGrok upsell');
+            }
+        });
+        // SuperGrok upsell — sidebar-footer banner, matched structurally (svg logo + trailing
+        // CTA button) since the message rotates and isn't a reliable match target
+        document.querySelectorAll('div.shrink-0.border-t.border-border').forEach(el => {
+            const inner = el.querySelector(':scope > div[role="button"].bg-black.text-white.dark');
+            if (inner && inner.querySelector('svg') && inner.querySelector('button')) {
+                el.style.setProperty('display', 'none', 'important');
+                logDebug('[HidePremium] Hidden sidebar-footer upsell');
             }
         });
         // SuperGrok upsell in model menu — hide inline so Radix/React can still reconcile
@@ -991,56 +1041,113 @@
     }
 
     // ══════════════════════════════════════════════════════════════
-    //  3d. Hide Heavy Model from Model Dropdown
+    //  3c3. Hide Sidebar Nav Items (Build / Imagine / Skills and Connectors)
     // ══════════════════════════════════════════════════════════════
-    const HEAVY_HIDE_CSS_ID = 'ge-hide-heavy-css';
+    // Matched by visible label text rather than href — Build's href isn't confirmed
+    // from the reference markup, and text-matching keeps Imagine/Skills-and-Connectors
+    // working even if Grok changes their routes.
+    const GE_SIDEBAR_NAV_HIDE_ITEMS = [
+        { key: 'build', label: 'Build', get: () => featureHideBuildNav },
+        { key: 'imagine', label: 'Imagine', get: () => featureHideImagineNav },
+        { key: 'skills', label: 'Skills and Connectors', get: () => featureHideSkillsNav },
+    ];
 
-    function ge_applyHideHeavyCSS(on) {
-        let el = document.getElementById(HEAVY_HIDE_CSS_ID);
-        if (on) {
-            if (!el) {
-                el = document.createElement('style');
-                el.id = HEAVY_HIDE_CSS_ID;
-                document.head.appendChild(el);
-            }
-            el.textContent = `
-                [data-ge-hidden="heavy"] { display: none !important; }
-                /* "Upgrade to Heavy" button */
-                button:has(> *):where([class*="rounded-full"]):not([aria-label]) {
-                    /* matched via JS below */
-                }
+    function ge_scanSidebarNavHide() {
+        const anyOn = GE_SIDEBAR_NAV_HIDE_ITEMS.some(i => i.get());
+        ge_applyToggleStyle('ge-navhide-css', anyOn, '[data-ge-navhide] { display: none !important; }');
+        document.querySelectorAll('[data-ge-navhide]').forEach(el => el.removeAttribute('data-ge-navhide'));
+        if (!anyOn) return;
+        document.querySelectorAll('[data-sidebar="menu-item"] a[data-sidebar="menu-button"]').forEach(link => {
+            const span = link.querySelector('span.whitespace-nowrap');
+            const text = span ? span.textContent.trim() : link.textContent.trim();
+            const match = GE_SIDEBAR_NAV_HIDE_ITEMS.find(i => i.get() && i.label === text);
+            if (!match) return;
+            const target = link.closest('[data-sidebar="group"]') || link.closest('[data-sidebar="menu-item"]');
+            if (target) target.setAttribute('data-ge-navhide', '1');
+        });
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    //  3d. Hide Models from Model Dropdown (Heavy / Expert / Auto)
+    // ══════════════════════════════════════════════════════════════
+    const MODELS_HIDE_CSS_ID = 'ge-hide-models-css';
+
+    function ge_applyHideModelsCSS(on) {
+        ge_applyToggleStyle(MODELS_HIDE_CSS_ID, on, `
+                [data-ge-hidden="model-heavy"] { display: none !important; }
+                [data-ge-hidden="model-expert"] { display: none !important; }
+                [data-ge-hidden="model-auto"] { display: none !important; }
                 [data-ge-hidden="upgrade-heavy"] { display: none !important; }
-            `;
-        } else {
-            if (el) el.remove();
-        }
+                [data-ge-hidden="followups"] { display: none !important; }
+            `);
+    }
+
+    // Walks elements matching `selector`, skipping ones already tagged with `checkedAttr`
+    // (or `hideAttr` itself if no separate checkedAttr is given), tags matches — on the
+    // element itself, or its nearest `containerSelector` ancestor — with hideAttr=hideValue.
+    function ge_markElements({ selector, test, hideAttr, hideValue, checkedAttr, containerSelector }) {
+        const skipAttr = checkedAttr || hideAttr;
+        document.querySelectorAll(`${selector}:not([${skipAttr}])`).forEach(el => {
+            if (checkedAttr) el.setAttribute(checkedAttr, '1');
+            if (!test(el)) return;
+            const target = containerSelector ? (el.closest(containerSelector) || el.parentElement) : el;
+            if (target && target.getAttribute(hideAttr) !== hideValue) target.setAttribute(hideAttr, hideValue);
+        });
     }
 
     // Mark "Upgrade to Heavy" buttons
     function ge_markUpgradeHeavyBtns() {
         if (!featureHideHeavy) return;
-        document.querySelectorAll('button:not([data-ge-hidden])').forEach(btn => {
-            if (/^upgrade\s+to\s+heavy$/i.test(btn.textContent.trim())) {
-                btn.setAttribute('data-ge-hidden', 'upgrade-heavy');
-            }
+        ge_markElements({
+            selector: 'button',
+            test: btn => /^upgrade\s+to\s+heavy$/i.test(btn.textContent.trim()),
+            hideAttr: 'data-ge-hidden', hideValue: 'upgrade-heavy',
         });
     }
 
-    // Mark Heavy items with data attribute (CSS does the hiding)
-    function ge_markHeavyItems() {
-        if (!featureHideHeavy) return;
+    // Map of toggle state → model name → data attribute value
+    function ge_markModelItems() {
+        document.querySelectorAll('[data-ge-hidden^="model-"]').forEach(el => el.removeAttribute('data-ge-hidden'));
+        const active = [];
+        if (featureHideHeavy) active.push(['Heavy', 'model-heavy']);
+        if (featureHideExpert) active.push(['Expert', 'model-expert']);
+        if (featureHideAuto) active.push(['Auto', 'model-auto']);
+        if (active.length === 0) return;
         for (const menu of document.querySelectorAll('[role="menu"]')) {
-            for (const item of menu.querySelectorAll('[role="menuitem"]:not([data-ge-hidden])')) {
+            for (const item of menu.querySelectorAll('[role="menuitem"]')) {
                 const span = item.querySelector('span.font-semibold');
-                if (span && /^Heavy$/i.test(span.textContent.trim())) {
-                    item.setAttribute('data-ge-hidden', 'heavy');
+                if (!span) continue;
+                const text = span.textContent.trim();
+                for (const [name, attr] of active) {
+                    if (new RegExp('^' + name + '$', 'i').test(text)) {
+                        item.setAttribute('data-ge-hidden', attr);
+                        break;
+                    }
                 }
             }
         }
     }
 
     // ══════════════════════════════════════════════════════════════
-    //  3e. Auto Private Mode
+    //  3e. Hide Follow-up Prompts
+    // ══════════════════════════════════════════════════════════════
+    function ge_markFollowupContainers() {
+        if (!featureHideFollowups) {
+            document.querySelectorAll('[data-ge-hidden="followups"]').forEach(el => el.removeAttribute('data-ge-hidden'));
+            return;
+        }
+        // Follow-ups appear as a flex-col container of buttons whose icon is corner-down-right.
+        ge_markElements({
+            selector: 'button',
+            test: btn => !!btn.querySelector('svg.lucide-corner-down-right, svg[class*="corner-down-right"]'),
+            hideAttr: 'data-ge-hidden', hideValue: 'followups',
+            checkedAttr: 'data-ge-followup-checked',
+            containerSelector: 'div.flex.flex-col.gap-1.mt-2.items-start.w-full',
+        });
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    //  3f. Auto Private Mode
     // ══════════════════════════════════════════════════════════════
     let _ge_privateTimer = null;
     function ge_autoEnablePrivateMode() {
@@ -1053,10 +1160,12 @@
     }
 
     // ══════════════════════════════════════════════════════════════
-    //  3g. Streamer Mode — hide sensitive chat names in sidebar
+    //  3g. Privacy Mode — hide/blur sensitive chat names in sidebar
     // ══════════════════════════════════════════════════════════════
-    const GE_STREAMER_PATTERNS = [
-        // Sexual / NSFW
+    // Grouped by category so Privacy Mode can hide/show each independently
+    // (e.g. hide NSFW + Drugs but leave Medical visible) instead of one flat list.
+    const GE_PRIVACY_CATEGORIES = {
+      nsfw: { label: 'NSFW / Sexual', patterns: [
         /\bsex\b/i, /\bsexy/i, /\bporn/i, /\bhentai/i, /\bnude/i, /\bnaked/i, /\bnsfw/i,
         /\berotic/i, /\bfetish/i, /\borgasm/i, /\bmasturbat/i, /\bblowjob/i,
         /\banal\b/i, /\bcum\b/i, /\bdick\b/i, /\bcock\b/i, /\bpussy/i,
@@ -1074,11 +1183,57 @@
         /\bpornhub/i, /\bxvideos/i, /\bxhamster/i, /\bredtube/i, /\byouporn/i,
         /\bbrazzers/i, /\bonlyfans/i, /\bchaturbate/i, /\bxnxx/i, /\bspankbang/i,
         /\bmyfreecams/i, /\blivejasmin/i, /\bfanvue/i, /\bfansly/i,
-        /\bcreampie/i, /\bthroat/i, /\bdeepthroat/i, /\bgangbang/i, /\b(dp)\b/i,
+        // More adult platforms / services
+        /\bmanyvids/i, /\bjustforfans/i, /\biwantclips/i, /\bclips4sale/i,
+        /\bloyalfans/i, /\bmym\s*fans/i, /\bfrisk\b/i, /\bsextpanther/i,
+        /\bniteflirt/i, /\bfancentro/i, /\bapclips/i, /\bbentbox/i,
+        /\bfantime/i, /\badmireme/i, /\bpocketstars/i, /\bavn\s*stars/i,
+        // Explicit descriptors & commonly requested terms
+        /\bswallow(s|ing|ed)?\b/i, /\bpleasure/i, /\buncensored/i,
+        /\blewd/i, /\bexplicit/i, /\bhardcore/i, /\bsoftcore/i,
+        /\bmoan(s|ing|ed)?\b/i, /\bnudes?\b/i, /\bleaked?\b/i,
+        /\bpremium\s*snap/i, /\bsnapchat\s*premium/i, /\bprivate\s*show/i,
+        /\bcustom\s*(video|pic|content|request)/i,
+        // Kinks / acts frequently flagged in adult contexts
+        /\bsquirt(s|ing|ed)?\b/i, /\bedging\b/i, /\bgoon(ing|ed)\b/i,
+        /\bbareback(s|ing|ed)?\b/i, /\brimjob\b/i, /\brimming\b/i, /\bpegging\b/i,
+        /\bcuckold(s|ing|ed)?\b/i, /\bcuck\b/i, /\bhotwife\b/i,
+        /\bfemdom\b/i, /\bfindom\b/i, /\bjoi\b/i, /\bgfe\b/i,
+        /\bgag(s|ging|ged)?\b/i,
+        // Adult anime / subgenre terms
+        /\byaoi\b/i, /\byuri\b/i, /\bdoujinshi\b/i, /\becchi\b/i,
+        /\bahegao\b/i, /\btentacle/i, /\bfan[\s-]*service/i,
+        /\bcreampie/i, /\bthroat(ing|ed|s)?\b/i, /\bdeepthroat/i, /\bgangbang/i, /\b(dp)\b/i,
         /\bfacial\b/i, /\bcumdump/i, /\bbreeding/i, /\bimpreg/i,
-        /\bnoncon/i, /\bcnc\b/i, /\bconsent\s*\/\s*non.con/i, /\bnon.con/i,
+        /\bface[\s-]*fuck(ing|ed|s)?\b/i, /\bthroat[\s-]*fuck(ing|ed|s)?\b/i,
+        /\bnoncon/i, /\bcnc\b/i, /\bconsensual\s+non[\s-]?consent\b/i, /\bconsent\s*\/\s*non.con/i, /\bnon.con/i,
         /\bstepmom/i, /\bstepsis/i, /\bstepbro/i, /\bstepdad/i, /\bstepfath/i,
         /\bmilf/i, /\bdilf/i, /\bcougar/i, /\brape/i,
+        // Additional NSFW / kink terms
+        /\bcum[\s-]*slut/i, /\bcumslut/i,
+        /\bbitch/i, /\bbreed\b/i, /\bbreeder\b/i,
+        /\bjerk\s*off/i, /\bwank/i, /\bhand[\s-]*job/i, /\btit[\s-]*job/i, /\bfoot[\s-]*job/i, /\bball[\s-]*bust/i,
+        /\bbukkake/i, /\bglory[\s-]*hole/i,
+        /\bcunt/i, /\bcum[\s-]*shot/i, /\bmoney[\s-]*shot/i, /\bblow[\s-]*bang/i,
+        /\bcam[\s-]*girl/i, /\bcam[\s-]*boy/i, /\bcam[\s-]*show/i,
+        /\bsexting/i, /\bphone[\s-]*sex/i, /\bnude[\s-]*selfie/i, /\bdick[\s-]*pic/i,
+        /\btitties/i, /\bboobies/i, /\basshole/i,
+        /\bstrip[\s-]*tease/i, /\blap[\s-]*dance/i, /\btwerk/i,
+        /\bstrip[\s-]*club/i, /\bbrothel/i, /\bred[\s-]*light/i, /\bmassage[\s-]*parlor/i, /\bhappy[\s-]*ending/i,
+        /\blingerie/i, /\bgarter/i, /\bstockings/i, /\bpanties/i, /\bthong/i, /\bbikini/i,
+        /\btopless/i, /\bbottomless/i,
+        /\bpublic[\s-]*sex/i, /\boutdoor[\s-]*sex/i, /\bcar[\s-]*sex/i, /\boffice[\s-]*sex/i,
+        /\bvoyeur/i, /\bexhibition(ist)?\b/i, /\borgasm[\s-]*denial/i,
+        /\bschool[\s-]*girl/i, /\bnurse\b/i, /\bmaid\b/i,
+        /\bpet\s*play/i, /\bddlg|dd\/lg|mdlb|md\/lb|cgl|cg\/l/i,
+        /\brope\s*play/i, /\bshibari/i, /\bkinbaku/i, /\bwax\s*play/i, /\bage\s*play/i, /\babdl|adult\s*baby/i,
+        /\bfist(ing)?\b/i, /\bdouble[\s-]*penetration/i, /\btriple[\s-]*penetration/i, /\bspit[\s-]*roast/i,
+        /\brough[\s-]*sex/i, /\bchoke\s*(play|me|sex)/i, /\bchoking/i, /\bspank(ing)?\b/i,
+        /\bdegrad(e|ing|ation)\b/i, /\bhumiliat(e|ing|ion)\b/i, /\btaboo/i, /\bincest/i,
+        /\bpunish(ment)?\b/i, /\bbrat(ty)?\b/i, /\bcollar(ed)?\b/i, /\bleash/i,
+        /\bsafeword/i, /\baftercare/i,
+      ]},
+      medical: { label: 'Medical / Personal', patterns: [
         // Personal / medical / embarrassing
         /\bstd\b/i, /\bherpes/i, /\bgonorrhea/i, /\bchlamydia/i, /\bsyphilis/i,
         /\bhiv\b/i, /\baids\b/i, /\bpregnant/i, /\bpregnancy/i, /\babortion/i,
@@ -1093,6 +1248,8 @@
         /\babuse/i, /\bdomestic\s*(violence|abuse)/i, /\bassault/i,
         /\bsexual\s*assault/i, /\bforced\b/i, /\bmolest/i, /\bstalking/i,
         /\bharass/i, /\bbatter(ed|y|ing)/i,
+      ]},
+      drugs: { label: 'Drugs', patterns: [
         // Drugs
         /\bweed\b/i, /\bmarijuana/i, /\bcannabis/i, /\bcocaine/i, /\bcoke\b/i, /\bcrack\b/i,
         /\bheroin/i, /\bmeth\b/i, /\bmethamphetamine/i, /\bamphetamine/i,
@@ -1101,12 +1258,31 @@
         /\bkratom/i, /\bopioid/i, /\bopiate/i, /\bbenzo/i,
         /\bthc\b/i, /\bcbd\b/i, /\bedible/i, /\bdab\b/i, /\bdabs\b/i,
         /\bvape/i, /\bsmok(e|ing)/i,
+        // More drugs
+        /\blean\b/i, /\bpurple\s*drank/i, /\bsyrup\b/i,
+        /\bmolly\b/i,
+        /\bsativa\b/i, /\bindica\b/i, /\bkush\b/i,
+        /\bblunt\b/i, /\bjoint\b/i, /\bbong\b/i, /\bpipe\b/i, /\bbowl\b/i, /\broach\b/i,
+        /\bvape\s*pen/i, /\bdab\s*rig/i,
+        /\bwax\b/i, /\bcrumble\b/i, /\bshatter\b/i, /\blive\s*resin/i, /\brosin\b/i, /\bdistillate/i,
+        /\bhash\b/i, /\bhashish/i, /\bkief\b/i,
+        /\bsalvia\b/i, /\bpeyote\b/i, /\bmescaline\b/i, /\bayahuasca\b/i, /\bibogaine\b/i,
+        /\bghb\b/i, /\bgbl\b/i, /\bpoppers\b/i, /\brush\b/i,
+        /\bnitrous\b/i, /\bwhippets\b/i, /\binhalant/i, /\bhuffing\b/i,
+        /\bdxm\b/i, /\btriple\s*c/i,
+        /\bbenzedrex\b/i, /\bpropylhexedrine\b/i,
+        /\bmethadone\b/i, /\bsuboxone\b/i, /\bsubutex\b/i, /\bbuprenorphine\b/i, /\bnaltrexone\b/i, /\bnaloxone\b/i,
+        /\btramadol\b/i, /\bcodeine\b/i, /\boxycodone\b/i, /\boxy\b/i, /\bpercocet\b/i, /\bvicodin\b/i, /\bhydrocodone\b/i, /\bmorphine\b/i,
+      ]},
+      legal: { label: 'Legal', patterns: [
         // Legal
         /\blawsuit/i, /\battorney/i, /\blawyer/i, /\blegal\s*(advice|issue|trouble|help)/i,
         /\bcourt\b/i, /\bsubpoena/i, /\bindict/i, /\bfelony/i, /\bmisdemeanor/i,
         /\bbail\b/i, /\bparole/i, /\bprobation/i, /\barrest/i, /\bwarrant/i,
         /\bsettlement/i, /\blitigat/i, /\bdefendant/i, /\bplaintiff/i,
         /\blegality/i,
+      ]},
+      weapons: { label: 'Weapons / Self-defense', patterns: [
         // Guns / ammo / self-defense
         /\bgun\b/i, /\bguns\b/i, /\bfirearm/i, /\brifle/i, /\bshotgun/i,
         /\bpistol/i, /\bhandgun/i, /\bholster/i, /\bammo\b/i, /\bammunition/i,
@@ -1124,63 +1300,501 @@
         // Less-lethal / self-defense tools
         /\btaser\b/i, /\bstun\s*gun/i, /\bpepper\s*spray/i, /\bmace\s*spray/i,
         /\bkubotan/i, /\bblackjack\b/i, /\bbaton\b/i, /\bnunchaku/i,
-    ];
+      ]},
+    };
 
-    // Pre-compile a single combined regex for performance
-    const _GE_STREAMER_COMBINED = new RegExp(GE_STREAMER_PATTERNS.map(r => r.source).join('|'), 'i');
+    // ── Per-category enable state (all on by default — matches pre-category behavior) ──
+    function ge_isPrivacyCategoryOn(key) {
+        return getState(`GrokEnhancer_PrivacyCat_${key}`, true);
+    }
+    function ge_setPrivacyCategoryOn(key, on) {
+        setState(`GrokEnhancer_PrivacyCat_${key}`, on);
+    }
 
-    function ge_applyStreamerCSS(on) {
-        let el = document.getElementById('ge-streamer-css');
-        if (on) {
-            if (!el) {
-                el = document.createElement('style');
-                el.id = 'ge-streamer-css';
-                document.head.appendChild(el);
-            }
-            // Completely hide matching sidebar links and command menu rows
-            el.textContent = `
-                [data-ge-streamer-hide] { display: none !important; }
-                [data-ge-streamer-row] { display: none !important; }
-            `;
-        } else {
-            if (el) el.remove();
-            document.querySelectorAll('[data-ge-streamer-hide]').forEach(e => e.removeAttribute('data-ge-streamer-hide'));
-            document.querySelectorAll('[data-ge-streamer-row]').forEach(e => e.removeAttribute('data-ge-streamer-row'));
-            document.querySelectorAll('[data-ge-streamer-checked]').forEach(e => e.removeAttribute('data-ge-streamer-checked'));
+    // ── User-added words/regexes (settings UI) ──
+    function ge_getPrivacyCustomWords() {
+        return getState('GrokEnhancer_StreamerCustomWords', []);
+    }
+    function ge_savePrivacyCustomWords(list) {
+        setState('GrokEnhancer_StreamerCustomWords', list);
+    }
+
+    // Pre-compile a single combined regex for performance; rebuilt when custom words
+    // or category toggles change.
+    let _GE_PRIVACY_COMBINED = null;
+    function ge_rebuildPrivacyRegex() {
+        const sources = [];
+        for (const key of Object.keys(GE_PRIVACY_CATEGORIES)) {
+            if (!ge_isPrivacyCategoryOn(key)) continue;
+            sources.push(...GE_PRIVACY_CATEGORIES[key].patterns.map(r => r.source));
         }
+        for (const w of ge_getPrivacyCustomWords()) {
+            if (!w.text) continue;
+            if (w.isRegex) {
+                try { new RegExp(w.text); sources.push(w.text); } catch (_) { /* invalid regex, skip */ }
+            } else {
+                sources.push('\\b' + w.text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b');
+            }
+        }
+        // An empty pattern would compile to /(?:)/, which matches every string —
+        // fall back to a regex that never matches instead.
+        _GE_PRIVACY_COMBINED = sources.length ? new RegExp(sources.join('|'), 'i') : /(?!)/;
+    }
+    ge_rebuildPrivacyRegex();
+
+    function ge_applyPrivacyCSS(on) {
+        // Either hide matching items completely or blur them, depending on the blur toggle.
+        const blur = on && featurePrivacyBlur;
+        const css = blur
+            ? `[data-ge-privacy-hide], [data-ge-privacy-row] {
+                    filter: blur(8px) !important;
+                    opacity: 0.7 !important;
+                    user-select: none !important;
+                    contain: paint !important;
+                    will-change: filter !important;
+                }`
+            : `[data-ge-privacy-hide] { display: none !important; }
+               [data-ge-privacy-row] { display: none !important; }`;
+        ge_applyToggleStyle('ge-privacy-css', on, css);
+        if (!on) {
+            document.querySelectorAll('[data-ge-privacy-hide]').forEach(e => e.removeAttribute('data-ge-privacy-hide'));
+            document.querySelectorAll('[data-ge-privacy-row]').forEach(e => e.removeAttribute('data-ge-privacy-row'));
+            document.querySelectorAll('[data-ge-privacy-checked]').forEach(e => e.removeAttribute('data-ge-privacy-checked'));
+            document.querySelectorAll('[data-ge-privacy-title]').forEach(e => { e.removeAttribute('data-ge-privacy-title'); e.style.removeProperty('visibility'); });
+            _ge_privacyTitleCache.clear();
+            if (_ge_privacyRealTitle !== null) { document.title = _ge_privacyRealTitle; _ge_privacyRealTitle = null; }
+            _ge_privacyHiddenCount = 0;
+            ge_updatePrivacyBadge();
+        }
+    }
+
+    // Sidebar footer identity (avatar/username/email) — static once rendered, so
+    // plain CSS per toggle is enough, no marking/scanning needed like the chat list.
+    function ge_applyFooterPrivacyCSS() {
+        const rules = [];
+        if (featurePrivacyMode && featureHideAvatar) rules.push('[data-sidebar="footer"] img[alt="pfp"] { visibility: hidden !important; }');
+        if (featurePrivacyMode && featureHideUsername) rules.push('[data-sidebar="footer"] span.text-sm.font-medium.truncate.leading-tight.text-fg-primary { visibility: hidden !important; }');
+        if (featurePrivacyMode && featureHideEmail) rules.push('[data-sidebar="footer"] span.text-xs.truncate.leading-tight.text-fg-secondary { visibility: hidden !important; }');
+        ge_applyToggleStyle('ge-footer-privacy-css', rules.length > 0, rules.join('\n'));
     }
 
     function _ge_testSensitive(text) {
         if (!text) return false;
-        return _GE_STREAMER_COMBINED.test(text);
+        return _GE_PRIVACY_COMBINED.test(text);
     }
 
-    function ge_scanSidebarForSensitive() {
-        if (!featureStreamer) return;
+    // Conversation id -> { text, sensitive }, filled in as sidebar links are scanned.
+    // Lets the active-chat-title masker (below) know whether the *currently open*
+    // chat is sensitive without re-deriving it from the DOM.
+    const _ge_privacyTitleCache = new Map();
+
+    function _ge_queryIncludingSelf(root, selector) {
+        if (!root) return [];
+        const out = [];
+        if (root.matches?.(selector)) out.push(root);
+        if (root.querySelectorAll) out.push(...root.querySelectorAll(selector));
+        return out;
+    }
+
+    let _ge_privacyHiddenCount = 0;
+
+    function ge_updatePrivacyBadge() {
+        const badge = document.getElementById('ge-privacy-badge');
+        if (!badge) return;
+        if (_ge_privacyHiddenCount <= 0) { badge.textContent = ''; return; }
+        const label = featurePrivacyBlur ? 'blurred' : 'hidden';
+        badge.textContent = ` (${_ge_privacyHiddenCount} ${label})`;
+    }
+
+    // scope: undefined/null = full document scan (initial load, toggle-on, word-list edits).
+    // Otherwise an array of newly-added DOM nodes — only those are scanned, so routine
+    // mutation-observer churn doesn't re-walk the whole sidebar every time.
+    function ge_scanPrivacySensitive(scope) {
+        if (!featurePrivacyMode) return;
+        const roots = scope ? scope : [document];
 
         // 1) Sidebar chat links: [data-sidebar] a[href^="/c/"]
-        document.querySelectorAll('[data-sidebar] a[href^="/c/"]:not([data-ge-streamer-checked])').forEach(link => {
-            link.setAttribute('data-ge-streamer-checked', '1');
-            const span = link.querySelector('span');
-            const text = span ? span.textContent.trim() : link.textContent.trim();
-            if (_ge_testSensitive(text)) {
-                link.setAttribute('data-ge-streamer-hide', '1');
+        for (const root of roots) {
+            for (const link of _ge_queryIncludingSelf(root, '[data-sidebar] a[href^="/c/"]')) {
+                if (link.hasAttribute('data-ge-privacy-checked')) continue;
+                link.setAttribute('data-ge-privacy-checked', '1');
+                const span = link.querySelector('span');
+                const text = span ? span.textContent.trim() : link.textContent.trim();
+                const sensitive = _ge_testSensitive(text);
+                if (sensitive) link.setAttribute('data-ge-privacy-hide', '1');
+                const cid = ge_extractPostId(link.getAttribute('href'));
+                if (cid) _ge_privacyTitleCache.set(cid, { text, sensitive });
             }
-        });
+        }
 
         // 2) Command menu dialog ("See all" — both small and large versions)
-        document.querySelectorAll('[data-analytics-name="command_menu"] [cmdk-item][data-value^="conversation:"]:not([data-ge-streamer-checked])').forEach(item => {
-            item.setAttribute('data-ge-streamer-checked', '1');
-            const titleSpan = item.querySelector('span.truncate');
-            const text = titleSpan ? titleSpan.textContent.trim() : '';
-            if (_ge_testSensitive(text)) {
-                item.setAttribute('data-ge-streamer-row', '1');
+        for (const root of roots) {
+            for (const item of _ge_queryIncludingSelf(root, '[data-analytics-name="command_menu"] [cmdk-item][data-value^="conversation:"]')) {
+                if (item.hasAttribute('data-ge-privacy-checked')) continue;
+                item.setAttribute('data-ge-privacy-checked', '1');
+                const titleSpan = item.querySelector('span.truncate');
+                const text = titleSpan ? titleSpan.textContent.trim() : '';
+                if (_ge_testSensitive(text)) item.setAttribute('data-ge-privacy-row', '1');
             }
+        }
+
+        _ge_privacyHiddenCount = document.querySelectorAll('[data-ge-privacy-hide],[data-ge-privacy-row]').length;
+        ge_updatePrivacyBadge();
+        ge_maskPrivacyTitle();
+    }
+
+    // Forces a clean re-scan of the whole document — needed after the sensitive-word
+    // list changes, since already-checked items must be re-evaluated against it.
+    function ge_rescanPrivacyFull() {
+        document.querySelectorAll('[data-ge-privacy-checked]').forEach(e => e.removeAttribute('data-ge-privacy-checked'));
+        document.querySelectorAll('[data-ge-privacy-hide]').forEach(e => e.removeAttribute('data-ge-privacy-hide'));
+        document.querySelectorAll('[data-ge-privacy-row]').forEach(e => e.removeAttribute('data-ge-privacy-row'));
+        _ge_privacyTitleCache.clear();
+        ge_scanPrivacySensitive();
+    }
+
+    // Grok's own React re-renders (selecting a chat, list virtualization) can strip
+    // our data-ge-privacy-* attributes off an existing node without removing/adding
+    // it, so the childList-only observers elsewhere never notice — Privacy Mode then
+    // silently "un-hides" until the next full page load. Watch for that churn too.
+    // ponytail: body-wide attribute watch, not a per-node retry-attach; cheap no-op
+    // when Privacy Mode is off, upgrade to a scoped observer if this proves too broad.
+    let _ge_privacyGuardTimer = null;
+    function ge_startPrivacyGuardObserver() {
+        const guard = new MutationObserver((mutations) => {
+            if (!featurePrivacyMode) return;
+            // Only react when a node that's supposed to carry our marker has lost it
+            // (a real React re-render stripped our attributes) — not on every incidental
+            // class/aria-selected flip. cmdk sets aria-selected on hover-highlight alone,
+            // which used to false-trigger a full rescan on every mouse move over the
+            // "See all chats" list, re-toggling filter:blur() on hundreds of items.
+            const relevant = mutations.some(m => {
+                const el = m.target.closest?.('[data-sidebar] a[href^="/c/"], [data-analytics-name="command_menu"] [cmdk-item]');
+                return el && !el.hasAttribute('data-ge-privacy-checked');
+            });
+            if (!relevant) return;
+            clearTimeout(_ge_privacyGuardTimer);
+            _ge_privacyGuardTimer = setTimeout(ge_rescanPrivacyFull, 150);
         });
+        guard.observe(document.body, {
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['class', 'data-state', 'aria-selected', 'aria-current'],
+        });
+    }
+
+    // Single entry point for turning Privacy Mode on/off — used by both the panel
+    // toggle and the panic hotkey so they always stay in sync.
+    function ge_setPrivacyMode(on) {
+        featurePrivacyMode = on;
+        setState('GrokEnhancer_Streamer', on);
+        ge_applyPrivacyCSS(on);
+        ge_applyFooterPrivacyCSS();
+        if (on) {
+            // Rescan immediately so already-rendered items hide, then again after the
+            // current event/mutation batch settles in case React is mid-render.
+            ge_rescanPrivacyFull();
+            requestAnimationFrame(() => ge_rescanPrivacyFull());
+        }
+        const checkbox = document.querySelector('#ge-panel #ge-privacy-toggle-input');
+        if (checkbox) checkbox.checked = on;
+    }
+
+    // Turning Privacy Mode off is the sensitive direction — gate it behind
+    // the PIN if one's set, so a panic hotkey press can't be trivially
+    // undone by whoever's next at the keyboard. Turning it on is always
+    // immediate. No PIN set at all = no gating, same as before.
+    function ge_requestPrivacyModeChange(on) {
+        if (on || !_ge_hasPinSet()) { ge_setPrivacyMode(on); return; }
+        // The panel checkbox's native `change` event fires after the browser
+        // already flipped input.checked — resync it back to "on" immediately
+        // so the UI doesn't lie while the PIN prompt is open or if cancelled.
+        const checkbox = document.querySelector('#ge-panel #ge-privacy-toggle-input');
+        if (checkbox) checkbox.checked = true;
+        ge_promptPinVerify(() => ge_setPrivacyMode(false), 'Enter PIN to disable Privacy Mode', 'Unlock');
+    }
+
+    // ── Panic hotkey: instantly toggle Privacy Mode from anywhere, including
+    // while typing in the chat composer — a panic hotkey has to fire the instant
+    // it's needed, not just when focus happens to be elsewhere. ──
+    let ge_privacyHotkey = getState('GrokEnhancer_StreamerHotkey', { ctrl: true, shift: true, alt: false, meta: false, key: 'h' });
+
+    function ge_formatHotkey(combo) {
+        const parts = [];
+        if (combo.ctrl) parts.push('Ctrl');
+        if (combo.shift) parts.push('Shift');
+        if (combo.alt) parts.push('Alt');
+        if (combo.meta) parts.push('Meta');
+        parts.push(combo.key.length === 1 ? combo.key.toUpperCase() : combo.key);
+        return parts.join('+');
+    }
+
+    function ge_matchesHotkey(e, combo) {
+        return !!combo &&
+            e.ctrlKey === !!combo.ctrl && e.shiftKey === !!combo.shift &&
+            e.altKey === !!combo.alt && e.metaKey === !!combo.meta &&
+            e.key.toLowerCase() === combo.key.toLowerCase();
+    }
+
+    // Use capture phase so Grok's own keydown handlers can't stopPropagation
+    // before the panic hotkey fires.
+    document.addEventListener('keydown', (e) => {
+        if (ge_matchesHotkey(e, ge_privacyHotkey)) {
+            e.preventDefault();
+            ge_requestPrivacyModeChange(!featurePrivacyMode);
+        }
+    }, true);
+
+    // ── Auto-lock on idle: enable Privacy Mode automatically after N minutes
+    // of no mouse/keyboard/tab activity. ──
+    let _ge_idleTimer = null;
+    function ge_resetIdleTimer() {
+        clearTimeout(_ge_idleTimer);
+        if (!featureAutoLock) return;
+        _ge_idleTimer = setTimeout(() => {
+            if (!featurePrivacyMode) ge_setPrivacyMode(true);
+        }, ge_autoLockMinutes * 60 * 1000);
+    }
+    function ge_startIdleWatch() {
+        ['mousemove', 'keydown', 'click', 'scroll'].forEach(evt =>
+            document.addEventListener(evt, ge_resetIdleTimer, { passive: true }));
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) ge_resetIdleTimer();
+        });
+        ge_resetIdleTimer();
+    }
+
+    // ── PIN lock — so someone who has your unlocked laptop can't flip Privacy
+    // Mode off (via the panel checkbox or the panic hotkey) or change/reset
+    // the PIN itself. The settings panel always opens freely. Stored as a
+    // SHA-256 hash, never the PIN itself; forgetting it just means "Reset PIN". ──
+    async function ge_sha256Hex(str) {
+        const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+        return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    function ge_openPinDialog({ title, confirmLabel, onSubmit }) {
+        const existing = document.getElementById('ge-pin-modal');
+        if (existing) { try { existing.close(); } catch (_) {} existing.remove(); }
+
+        const dlg = document.createElement('dialog');
+        dlg.id = 'ge-pin-modal';
+        dlg.style.cssText = 'background:#1a1a1a;border:1px solid #333;border-radius:12px;width:260px;padding:20px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#ccc;text-align:center;';
+        const bkStyle = document.createElement('style');
+        bkStyle.textContent = '#ge-pin-modal::backdrop{background:rgba(0,0,0,0.6)}';
+        dlg.appendChild(bkStyle);
+
+        const h = document.createElement('h2');
+        h.textContent = title;
+        h.style.cssText = 'margin:0 0 12px;font-size:14px;color:#fff;';
+        dlg.appendChild(h);
+
+        const input = document.createElement('input');
+        input.type = 'password';
+        input.inputMode = 'numeric';
+        input.maxLength = 4;
+        input.style.cssText = 'width:100%;box-sizing:border-box;background:#111;color:#fff;border:1px solid #333;border-radius:6px;padding:8px;font-size:20px;letter-spacing:8px;text-align:center;';
+        dlg.appendChild(input);
+
+        const err = document.createElement('div');
+        err.style.cssText = 'color:#e55;font-size:11px;height:16px;margin-top:6px;';
+        dlg.appendChild(err);
+
+        const btnRow = document.createElement('div');
+        btnRow.style.cssText = 'display:flex;gap:8px;margin-top:12px;';
+        const cancelBtn = document.createElement('button');
+        cancelBtn.textContent = 'Cancel';
+        cancelBtn.style.cssText = 'flex:1;background:#333;color:#aaa;border:none;border-radius:6px;padding:8px;cursor:pointer;';
+        cancelBtn.addEventListener('click', () => { dlg.close(); dlg.remove(); });
+        const okBtn = document.createElement('button');
+        okBtn.textContent = confirmLabel;
+        okBtn.style.cssText = 'flex:1;background:#444;color:#fff;border:none;border-radius:6px;padding:8px;cursor:pointer;';
+        const submit = async () => {
+            const ok = await onSubmit(input.value, err);
+            if (ok) { dlg.close(); dlg.remove(); }
+            else { input.value = ''; input.focus(); }
+        };
+        okBtn.addEventListener('click', submit);
+        input.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+        btnRow.appendChild(cancelBtn);
+        btnRow.appendChild(okBtn);
+        dlg.appendChild(btnRow);
+
+        document.body.appendChild(dlg);
+        dlg.showModal();
+        input.focus();
+    }
+
+    // Whether a PIN has actually been set — the authoritative "does gating
+    // apply at all" check, since it's the actual secret being protected
+    // (more reliable than the featurePinLock flag, a separate key).
+    function _ge_hasPinSet() {
+        return !!getState('GrokEnhancer_SettingsPinHash', null);
+    }
+
+    function ge_promptPinVerify(onSuccess, title, confirmLabel) {
+        ge_openPinDialog({
+            title,
+            confirmLabel,
+            onSubmit: async (val, errEl) => {
+                if (!/^\d{4}$/.test(val)) { errEl.textContent = 'Enter a 4-digit PIN'; return false; }
+                const stored = getState('GrokEnhancer_SettingsPinHash', null);
+                const hash = await ge_sha256Hex(val);
+                if (!stored || hash === stored) { onSuccess(); return true; }
+                errEl.textContent = 'Incorrect PIN';
+                return false;
+            },
+        });
+    }
+
+    function ge_setupPin(onDone) {
+        ge_openPinDialog({
+            title: 'Set a 4-digit PIN',
+            confirmLabel: 'Next',
+            onSubmit: async (first, errEl) => {
+                if (!/^\d{4}$/.test(first)) { errEl.textContent = 'Enter a 4-digit PIN'; return false; }
+                ge_openPinDialog({
+                    title: 'Confirm PIN',
+                    confirmLabel: 'Save',
+                    onSubmit: async (second, errEl2) => {
+                        if (second !== first) { errEl2.textContent = "PINs don't match"; return false; }
+                        const hash = await ge_sha256Hex(first);
+                        setState('GrokEnhancer_SettingsPinHash', hash);
+                        featurePinLock = true;
+                        setState('GrokEnhancer_PinLock', true);
+                        if (onDone) onDone();
+                        return true;
+                    },
+                });
+                return true;
+            },
+        });
+    }
+
+    // ── Mask the open chat's own title (browser tab + on-page header) ──
+    let _ge_privacyRealTitle = null;
+
+    function ge_maskPrivacyTitle() {
+        const cid = ge_extractPostId(location.pathname);
+        const cached = cid ? _ge_privacyTitleCache.get(cid) : null;
+        const sensitive = !!(featurePrivacyMode && cached && cached.sensitive);
+
+        if (sensitive) {
+            if (_ge_privacyRealTitle === null) _ge_privacyRealTitle = document.title;
+            document.title = 'Grok';
+        } else if (_ge_privacyRealTitle !== null) {
+            document.title = _ge_privacyRealTitle;
+            _ge_privacyRealTitle = null;
+        }
+
+        document.querySelectorAll('[data-ge-privacy-title]').forEach(el => {
+            el.removeAttribute('data-ge-privacy-title');
+            el.style.removeProperty('visibility');
+        });
+        if (!sensitive) return;
+
+        // ponytail: exact header selector unverified against live grok.com DOM — matched by
+        // text against the known sidebar title instead of a brittle guessed classname.
+        const heading = [...document.querySelectorAll('main h1, main h2, [role="heading"]')]
+            .find(el => el.textContent.trim() === cached.text && !el.closest('[data-sidebar]'));
+        if (heading) {
+            heading.setAttribute('data-ge-privacy-title', '1');
+            heading.style.setProperty('visibility', 'hidden', 'important');
+        }
+    }
+
+    function ge_openPrivacyWordsEditor() {
+        let existing = document.getElementById('ge-privacy-words-modal');
+        if (existing) { try { existing.close(); } catch (_) {} existing.remove(); }
+
+        const dlg = document.createElement('dialog');
+        dlg.id = 'ge-privacy-words-modal';
+        dlg.style.cssText = 'background:#1a1a1a;border:1px solid #333;border-radius:12px;width:420px;max-width:90vw;max-height:80vh;overflow-y:auto;padding:20px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#ccc;';
+        const bkStyle = document.createElement('style');
+        bkStyle.textContent = '#ge-privacy-words-modal::backdrop{background:rgba(0,0,0,0.6)}';
+        dlg.appendChild(bkStyle);
+
+        function closeModal() { try { dlg.close(); } catch (_) {} dlg.remove(); }
+        function reopen() { closeModal(); ge_openPrivacyWordsEditor(); }
+
+        const title = document.createElement('h2');
+        title.textContent = 'Privacy Mode — Custom Words';
+        title.style.cssText = 'margin:0 0 16px;font-size:16px;color:#fff;';
+        dlg.appendChild(title);
+
+        const list = ge_getPrivacyCustomWords();
+        if (list.length === 0) {
+            const empty = document.createElement('div');
+            empty.textContent = 'No custom words yet.';
+            empty.style.cssText = 'color:#666;font-size:12px;padding:8px 0;';
+            dlg.appendChild(empty);
+        }
+
+        list.forEach(w => {
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:6px;';
+            const txt = document.createElement('span');
+            txt.textContent = w.text + (w.isRegex ? ' (regex)' : '');
+            txt.style.cssText = 'flex:1;font-size:12px;color:#ddd;word-break:break-all;';
+            row.appendChild(txt);
+            const delBtn = document.createElement('button');
+            delBtn.textContent = 'Del';
+            delBtn.style.cssText = 'background:#333;color:#f66;border:none;border-radius:4px;padding:2px 8px;font-size:11px;cursor:pointer;';
+            delBtn.addEventListener('click', () => {
+                ge_savePrivacyCustomWords(ge_getPrivacyCustomWords().filter(x => x.id !== w.id));
+                ge_rebuildPrivacyRegex();
+                ge_rescanPrivacyFull();
+                reopen();
+            });
+            row.appendChild(delBtn);
+            dlg.appendChild(row);
+        });
+
+        const addRow = document.createElement('div');
+        addRow.style.cssText = 'display:flex;flex-direction:column;gap:6px;margin-top:12px;padding-top:12px;border-top:1px solid #333;';
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.placeholder = 'Word or regex to hide';
+        input.style.cssText = 'background:#111;border:1px solid #333;border-radius:6px;padding:6px 8px;color:#ddd;font-size:12px;font-family:inherit;width:100%;box-sizing:border-box;outline:none;';
+        addRow.appendChild(input);
+        const regexLabel = document.createElement('label');
+        regexLabel.style.cssText = 'font-size:11px;color:#aaa;display:flex;align-items:center;gap:6px;';
+        const regexCheck = document.createElement('input');
+        regexCheck.type = 'checkbox';
+        regexLabel.appendChild(regexCheck);
+        regexLabel.appendChild(document.createTextNode('Treat as regex'));
+        addRow.appendChild(regexLabel);
+        const addBtn = document.createElement('button');
+        addBtn.textContent = '+ Add Word';
+        addBtn.style.cssText = 'background:#444;color:#fff;border:none;border-radius:6px;padding:6px 16px;font-size:12px;cursor:pointer;align-self:flex-start;';
+        addBtn.addEventListener('click', () => {
+            const text = input.value.trim();
+            if (!text) { input.style.borderColor = '#f66'; input.focus(); return; }
+            if (regexCheck.checked) {
+                try { new RegExp(text); } catch (_) { input.style.borderColor = '#f66'; input.focus(); return; }
+            }
+            const all = ge_getPrivacyCustomWords();
+            all.push({ id: ge_generateId(), text, isRegex: regexCheck.checked });
+            ge_savePrivacyCustomWords(all);
+            ge_rebuildPrivacyRegex();
+            ge_rescanPrivacyFull();
+            reopen();
+        });
+        addRow.appendChild(addBtn);
+        dlg.appendChild(addRow);
+
+        const closeBtn = document.createElement('button');
+        closeBtn.textContent = 'Close';
+        closeBtn.style.cssText = 'background:#333;color:#aaa;border:none;border-radius:6px;padding:6px 16px;font-size:12px;cursor:pointer;margin-top:14px;';
+        closeBtn.addEventListener('click', closeModal);
+        dlg.appendChild(closeBtn);
+
+        document.body.appendChild(dlg);
+        dlg.showModal();
     }
 
     // ══════════════════════════════════════════════════════════════
-    //  3f. Custom Response Styles
+    //  3h. Custom Response Styles
     // ══════════════════════════════════════════════════════════════
     function ge_getCustomStyles() {
         return getState('GrokEnhancer_CustomStyles', []);
@@ -1372,23 +1986,127 @@
         dlg.showModal();
     }
 
-    // Inject custom style buttons into Grok's Customize settings dialog — REMOVED
-    // Custom styles are now managed entirely through the GE panel's Manage button
-    function ge_injectCustomStyles() { /* no-op */ }
-
     // ══════════════════════════════════════════════════════════════
     //  4. Rate Limit Display
+    //  KHROTU, ported from Blankspeaker & CursedAtom
+    //  (https://greasyfork.org/en/scripts/558017-grok-rate-limit-display)
     // ══════════════════════════════════════════════════════════════
     let rl_lastHigh = { remaining: null, wait: null };
     let rl_lastLow  = { remaining: null, wait: null };
     let rl_lastBoth = { high: null, low: null, wait: null };
 
     const MODEL_MAP = {
+        "Grok 4.3 (beta)": "grok-420-computer-use-sa", "Grok 4.20 (Beta)": "grok-420", "Grok 420": "grok-420",
         "Grok 4": "grok-4", "Grok 3": "grok-3", "Grok 4 Heavy": "grok-4-heavy",
         "Grok 4 With Effort Decider": "grok-4-auto", "Auto": "grok-4-auto", "Fast": "grok-3",
         "Expert": "grok-4", "Heavy": "grok-4-heavy", "Grok 4 Fast": "grok-4-mini-thinking-tahoe",
         "Grok 4.1": "grok-4-1-non-thinking-w-tool", "Grok 4.1 Thinking": "grok-4-1-thinking-1129",
+        "Grok 2": "grok-2", "Grok 2 Mini": "grok-2-mini",
     };
+
+    // ── Local usage tracking (reconciles API-reported totals/window with a
+    // locally-tracked usage history, since Grok's own remaining-count can lag) ──
+    const RL_STATE_DEFAULTS = { totalQueries: 40, windowSizeSeconds: 7200, usage: [] };
+    let rl_state = getState('grok_state', {});
+    function rl_saveState() { setState('grok_state', rl_state); }
+    function rl_cleanupOldUsages() {
+        let changed = false;
+        const now = Date.now();
+        for (const model in rl_state) {
+            const windowMs = (rl_state[model].windowSizeSeconds || 7200) * 1000;
+            const before = rl_state[model].usage.length;
+            rl_state[model].usage = rl_state[model].usage.filter(ts => (now - ts) < windowMs);
+            if (rl_state[model].usage.length !== before) changed = true;
+        }
+        if (changed) rl_saveState();
+    }
+    setInterval(rl_cleanupOldUsages, 60000);
+    function rl_getRemainingLocally(model, apiTotal, windowSize) {
+        if (!rl_state[model]) rl_state[model] = JSON.parse(JSON.stringify(RL_STATE_DEFAULTS));
+        if (apiTotal != null) rl_state[model].totalQueries = apiTotal;
+        if (windowSize != null) rl_state[model].windowSizeSeconds = windowSize;
+        rl_saveState();
+        rl_cleanupOldUsages();
+        const total = rl_state[model].totalQueries || (model === 'grok-420' || model === 'grok-420-computer-use-sa' ? 40 : 100);
+        const remaining = Math.max(0, total - rl_state[model].usage.length);
+        const windowMs = (rl_state[model].windowSizeSeconds || 7200) * 1000;
+        let waitSeconds = 0;
+        if (rl_state[model].usage.length > 0) {
+            const oldest = Math.min(...rl_state[model].usage);
+            waitSeconds = Math.max(0, Math.ceil((oldest + windowMs - Date.now()) / 1000));
+        }
+        return { remaining, waitSeconds };
+    }
+    function rl_addUsage(model) {
+        if (!featureRateLimit) return;
+        if (!rl_state[model]) rl_state[model] = JSON.parse(JSON.stringify(RL_STATE_DEFAULTS));
+        const now = Date.now();
+        if (!rl_state[model].usage.some(ts => Math.abs(now - ts) < 2000)) {
+            rl_state[model].usage.push(now);
+            rl_saveState();
+            if (rl_lastQueryBar) rl_fetchAndUpdate(rl_lastQueryBar, true);
+        }
+    }
+    function rl_setRateLimitHit(model) {
+        if (!featureRateLimit) return;
+        if (!rl_state[model]) rl_state[model] = JSON.parse(JSON.stringify(RL_STATE_DEFAULTS));
+        const total = rl_state[model].totalQueries || (model === 'grok-420' || model === 'grok-420-computer-use-sa' ? 40 : 100);
+        const currentUsage = rl_state[model].usage.length;
+        if (currentUsage < total) {
+            const now = Date.now();
+            for (let i = 0; i < (total - currentUsage); i++) rl_state[model].usage.push(now - (i * 10));
+            rl_saveState();
+            if (rl_lastQueryBar) rl_fetchAndUpdate(rl_lastQueryBar, true);
+        }
+    }
+    function rl_getModelFromBody(body) {
+        if (!body) return null;
+        const modeId = body.modeId || body.modelName || body.metadata?.request_metadata?.mode || body.metadata?.requestMetadata?.mode || body.metadata?.modelName || body.metadata?.model_name;
+        const modelMode = body.modelMode;
+        if (modeId === 'grok-420' || modeId === 'grok-420-computer-use-sa' || modelMode === 'MODEL_MODE_GROK_420') return modeId;
+        if (modeId === 'heavy' || modelMode === 'MODEL_MODE_HEAVY' || modeId === 'grok-4-heavy') return 'grok-4-heavy';
+        if (modeId === 'fast' || modelMode === 'MODEL_MODE_FAST' || modeId === 'grok-3') return 'grok-3';
+        if (modeId === 'expert' || modelMode === 'MODEL_MODE_EXPERT' || modeId === 'grok-4') return 'grok-4';
+        if (modeId === 'auto' || modelMode === 'MODEL_MODE_AUTO' || modeId === 'grok-4-auto') return 'auto';
+        return null;
+    }
+
+    // Record local usage for a just-sent chat request, and detect a 429 "Too many
+    // requests" response to mark that model's local quota as exhausted. Called from
+    // the shared _win.fetch interceptor with the response promise it's already returning
+    // (never fetches a second time).
+    function rl_trackUsageAndLimit(model, resultPromise) {
+        if (model === 'auto') {
+            resultPromise.then(async (res) => {
+                if (!res.ok) return;
+                try {
+                    const clone = res.clone();
+                    const reader = clone.body.getReader();
+                    const decoder = new TextDecoder();
+                    let buffer = '';
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        buffer += decoder.decode(value, { stream: true });
+                        if (buffer.includes('"effort":"high"') || buffer.includes('"effort": "high"') || buffer.includes('"effortLevel":"high"') || buffer.includes('"is_high_effort":true')) { rl_addUsage('grok-4'); break; }
+                        else if (buffer.includes('"effort":"low"') || buffer.includes('"effort": "low"') || buffer.includes('"effortLevel":"low"') || buffer.includes('"is_high_effort":false')) { rl_addUsage('grok-3'); break; }
+                        if (buffer.length > 50000) buffer = buffer.slice(-10000);
+                    }
+                } catch (_) {}
+            }).catch(() => {});
+        } else {
+            rl_addUsage(model);
+        }
+        resultPromise.then(async (res) => {
+            if (res.status === 429 || !res.ok) {
+                try {
+                    const clone2 = res.clone();
+                    const d = await clone2.json();
+                    if (d?.error?.message === 'Too many requests' || d?.error?.code === 8) rl_setRateLimitHit(model === 'auto' ? 'grok-4' : model);
+                } catch (_) {}
+            }
+        }).catch(() => {});
+    }
     const RL_DEFAULT_MODEL = "grok-4";
     const RL_DEFAULT_KIND  = "DEFAULT";
     const RL_POLL_MS       = 30000;
@@ -1398,7 +2116,7 @@
     const rl_cache = {};
 
     let rl_countdownTimer = null, rl_isCounting = false;
-    let rl_lastQueryBar = null, rl_lastModelObs = null, rl_lastThinkObs = null, rl_lastSearchObs = null;
+    let rl_lastQueryBar = null, rl_lastModelObs = null, rl_lastThinkObs = null, rl_lastSearchObs = null, rl_lastBodyObs = null;
     let rl_lastInput = null, rl_lastSubmit = null, rl_pollInterval = null, rl_lastModelName = null;
     let rl_overlapInterval = null, rl_isHidden = false;
 
@@ -1430,6 +2148,14 @@
         return h > 0 ? `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}` : `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
     }
 
+    let rl_measureCanvas = null;
+    function rl_textWidth(text, font) {
+        if (!rl_measureCanvas) rl_measureCanvas = document.createElement('canvas');
+        const ctx = rl_measureCanvas.getContext('2d');
+        ctx.font = font;
+        return ctx.measureText(text).width;
+    }
+
     function rl_checkOverlap(qb) {
         const rc = document.getElementById(RL_CONTAINER_ID);
         if (!rc) return;
@@ -1437,10 +2163,19 @@
         const ta = qb.querySelector('textarea[aria-label*="Ask Grok"]');
         const inp = ce || ta;
         if (!inp) return;
-        const txt = (inp.value || inp.textContent || '').trim().length;
+        const raw = (inp.value || inp.textContent || '').trim();
         const avail = qb.offsetWidth - rc.offsetWidth - 100;
         const small = window.innerWidth < 900 || avail < 200;
         const lim = small ? 0 : 28;
+        let txt = raw.length;
+        // Empty field on mobile: the placeholder itself can visually reach the
+        // badge even though nothing's been typed, so measure its rendered
+        // width instead of guessing from character count.
+        if (!raw && small && inp.placeholder) {
+            const cs = getComputedStyle(inp);
+            const phWidth = rl_textWidth(inp.placeholder, `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`);
+            if (phWidth > avail) txt = lim + 1;
+        }
         const hide = txt > lim;
         if (hide && !rl_isHidden) {
             rc.style.transition = 'transform 0.2s ease-out, opacity 0.2s ease-out';
@@ -1468,6 +2203,42 @@
     }
 
     function rl_removeExisting() { const e = document.getElementById(RL_CONTAINER_ID); if (e) e.remove(); }
+
+    // Long-press reset menu — lets the user clear the locally-tracked usage
+    // history for the current model, or for every model.
+    function rl_showResetMenu(anchor, modelName, qb) {
+        const existing = document.getElementById('grok-rate-limit-reset-menu');
+        if (existing) existing.remove();
+        const menu = document.createElement('div');
+        menu.id = 'grok-rate-limit-reset-menu';
+        menu.style.cssText = 'position:fixed;background:#1a1a1a;border:1px solid #333;border-radius:12px;padding:8px;z-index:9999;box-shadow:0 10px 25px rgba(0,0,0,0.5);color:#e5e5e5;min-width:140px;font-size:14px;';
+        const createBtn = (text, action, isCancel) => {
+            const b = document.createElement('button');
+            b.textContent = text;
+            b.style.cssText = `width:100%;text-align:${isCancel ? 'center' : 'left'};padding:8px 12px;border-radius:8px;background:none;border:none;color:inherit;cursor:pointer;`;
+            if (isCancel) b.style.color = '#9a9a9a';
+            b.onmouseover = () => b.style.background = '#333';
+            b.onmouseout = () => b.style.background = 'none';
+            b.onclick = (e) => { e.stopPropagation(); action(); menu.remove(); };
+            return b;
+        };
+        menu.appendChild(createBtn('Reset Current', () => {
+            if (modelName === 'grok-4-auto') { rl_state['grok-4'] = { usage: [] }; rl_state['grok-3'] = { usage: [] }; }
+            else if (modelName) rl_state[modelName] = { usage: [] };
+            rl_saveState(); rl_fetchAndUpdate(qb, true);
+        }));
+        menu.appendChild(createBtn('Reset All', () => { rl_state = {}; rl_saveState(); rl_fetchAndUpdate(qb, true); }));
+        menu.appendChild(createBtn('Cancel', () => {}, true));
+        document.body.appendChild(menu);
+        const rect = anchor.getBoundingClientRect();
+        const menuRect = menu.getBoundingClientRect();
+        let targetLeft = rect.left + (rect.width / 2) - (menuRect.width / 2);
+        if (targetLeft < 10) targetLeft = 10;
+        menu.style.left = `${targetLeft}px`;
+        menu.style.top = `${rect.top - menuRect.height - 8}px`;
+        const close = (e) => { if (!menu.contains(e.target) && !anchor.contains(e.target)) { menu.remove(); document.removeEventListener('mousedown', close); } };
+        setTimeout(() => document.addEventListener('mousedown', close), 0);
+    }
 
     function rl_getModelKey(qb) {
         const btn = qb.querySelector(RL_MODEL_SEL);
@@ -1539,7 +2310,14 @@
             rc.id = RL_CONTAINER_ID;
             rc.className = 'inline-flex items-center justify-center gap-2 whitespace-nowrap font-medium focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60 disabled:cursor-not-allowed [&_svg]:duration-100 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg]:-mx-0.5 select-none text-fg-primary hover:bg-button-ghost-hover hover:border-border-l2 disabled:hover:bg-transparent h-10 px-3.5 py-2 text-sm rounded-full group/rate-limit transition-colors duration-100 relative overflow-hidden border border-transparent cursor-pointer';
             rc.style.opacity = '0.8'; rc.style.transition = 'opacity 0.1s ease-in-out'; rc.style.zIndex = '20';
-            rc.addEventListener('click', () => rl_fetchAndUpdate(qb, true));
+            let rl_pressTimer = null;
+            rc.addEventListener('mousedown', () => { rl_pressTimer = setTimeout(() => rl_showResetMenu(rc, rl_lastModelName, qb), 2000); });
+            rc.addEventListener('mouseup', () => clearTimeout(rl_pressTimer));
+            rc.addEventListener('mouseleave', () => clearTimeout(rl_pressTimer));
+            rc.addEventListener('click', () => {
+                clearTimeout(rl_pressTimer);
+                if (!document.getElementById('grok-rate-limit-reset-menu')) rl_fetchAndUpdate(qb, true);
+            });
 
             const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
             svg.setAttribute('width','18'); svg.setAttribute('height','18'); svg.setAttribute('viewBox','0 0 24 24');
@@ -1647,6 +2425,28 @@
         return rem !== undefined ? { remainingQueries: rem, waitTimeSeconds: data[rk]?.waitTimeSeconds || data.waitTimeSeconds || 0 } : { error: true };
     }
 
+    // Reconcile the API's reported totals/window into the locally-tracked usage
+    // history and overwrite the API's (sometimes-stale) remaining/wait with the
+    // locally-computed one, same as rate-limit.txt's fetchAndUpdateRateLimit.
+    function rl_reconcileLocal(data, effort) {
+        if (data.error) return data;
+        if (effort === 'both') {
+            const h = rl_getRemainingLocally('grok-4', data.highEffortRateLimits?.totalQueries, data.windowSizeSeconds);
+            const l = rl_getRemainingLocally('grok-3', data.lowEffortRateLimits?.totalQueries, data.windowSizeSeconds);
+            data.highEffortRateLimits = { ...data.highEffortRateLimits, remainingQueries: h.remaining, waitTimeSeconds: h.waitSeconds };
+            data.lowEffortRateLimits = { ...data.lowEffortRateLimits, remainingQueries: l.remaining, waitTimeSeconds: l.waitSeconds };
+        } else {
+            const rk = effort === 'high' ? 'highEffortRateLimits' : 'lowEffortRateLimits';
+            const apiTotal = data[rk]?.totalQueries ?? data.totalQueries;
+            const b = rl_getRemainingLocally(rl_lastModelForReconcile, apiTotal, data.windowSizeSeconds);
+            if (!data[rk]) data[rk] = {};
+            data[rk].remainingQueries = b.remaining;
+            data[rk].waitTimeSeconds = b.waitSeconds;
+        }
+        return data;
+    }
+    let rl_lastModelForReconcile = null;
+
     async function rl_fetchAndUpdate(qb, force = false) {
         if (!featureRateLimit) { rl_removeExisting(); return; }
         if (rl_isImagine() || !qb || !document.body.contains(qb)) return;
@@ -1664,6 +2464,8 @@
             }
         }
         const data = await rl_fetchLimit(model, kind, force);
+        rl_lastModelForReconcile = model;
+        rl_reconcileLocal(data, effort);
         rl_updateDisplay(qb, rl_processData(data, effort), effort);
         rl_lastModelName = model;
     }
@@ -1689,7 +2491,7 @@
             }
         }
 
-        new MutationObserver(() => {
+        rl_lastBodyObs = new MutationObserver(() => {
             if (rl_isImagine()) {
                 rl_removeExisting(); rl_stopOverlap();
                 if (rl_lastModelObs) { rl_lastModelObs.disconnect(); rl_lastModelObs = null; }
@@ -1721,7 +2523,8 @@
                 rl_lastInput = null; rl_lastSubmit = null;
                 if (rl_pollInterval) { clearInterval(rl_pollInterval); rl_pollInterval = null; }
             }
-        }).observe(document.body, { childList: true, subtree: true });
+        });
+        rl_lastBodyObs.observe(document.body, { childList: true, subtree: true });
     }
 
     function rl_setupQBarObs(qb) {
@@ -1769,641 +2572,12 @@
     }
 
     // ══════════════════════════════════════════════════════════════
-    //  5. Bulk Deleter
-    // ══════════════════════════════════════════════════════════════
-    let ge_stopRequested = false;
-    let ge_isRunning = false;
-
-    function ge_delay(ms) {
-        return new Promise(r => {
-            const t = setTimeout(r, ms);
-            // Allow early abort
-            const check = setInterval(() => { if (ge_stopRequested) { clearTimeout(t); clearInterval(check); r(); } }, 100);
-            setTimeout(() => clearInterval(check), ms + 50);
-        });
-    }
-
-    function ge_showConfirm(title, desc) {
-        return new Promise(resolve => {
-            const overlay = document.createElement('div');
-            Object.assign(overlay.style, {
-                position: 'fixed', inset: '0', zIndex: '99999',
-                background: 'rgba(0,0,0,0.6)', display: 'flex',
-                alignItems: 'center', justifyContent: 'center',
-            });
-            const box = document.createElement('div');
-            Object.assign(box.style, {
-                background: '#141414', border: '1px solid #2a2a2a',
-                borderRadius: '20px', padding: '24px', maxWidth: '380px',
-                width: '90%', textAlign: 'center', color: '#ccc',
-                fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-                boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
-            });
-            const h = document.createElement('h3');
-            h.textContent = title;
-            Object.assign(h.style, { margin: '0 0 8px', fontSize: '16px', fontWeight: '600', color: '#fff' });
-            const p = document.createElement('p');
-            p.textContent = desc;
-            Object.assign(p.style, { margin: '0 0 20px', fontSize: '13px', color: '#999', lineHeight: '1.5' });
-            const acts = document.createElement('div');
-            Object.assign(acts.style, { display: 'flex', gap: '12px', justifyContent: 'center' });
-            const cancelBtn = document.createElement('button');
-            cancelBtn.textContent = 'Cancel';
-            Object.assign(cancelBtn.style, {
-                padding: '8px 20px', borderRadius: '12px', border: '1px solid #333',
-                fontSize: '13px', fontWeight: '500', cursor: 'pointer',
-                background: 'transparent', color: '#ccc',
-            });
-            const delBtn = document.createElement('button');
-            delBtn.textContent = 'Delete All';
-            Object.assign(delBtn.style, {
-                padding: '8px 20px', borderRadius: '12px', border: '1px solid #ef4444',
-                fontSize: '13px', fontWeight: '500', cursor: 'pointer',
-                background: '#ef4444', color: '#fff',
-            });
-            acts.appendChild(cancelBtn);
-            acts.appendChild(delBtn);
-            box.appendChild(h);
-            box.appendChild(p);
-            box.appendChild(acts);
-            overlay.appendChild(box);
-            document.body.appendChild(overlay);
-            cancelBtn.onclick = () => { overlay.remove(); resolve(false); };
-            delBtn.onclick = () => { overlay.remove(); resolve(true); };
-            overlay.onclick = (e) => { if (e.target === overlay) { overlay.remove(); resolve(false); } };
-        });
-    }
-
-    function ge_showProgress(title) {
-        const overlay = document.createElement('div');
-        overlay.setAttribute('data-ge-progress', 'true');
-        Object.assign(overlay.style, {
-            position: 'fixed', inset: '0', zIndex: '99999',
-            background: 'rgba(0,0,0,0.6)', display: 'flex',
-            alignItems: 'center', justifyContent: 'center',
-        });
-        const box = document.createElement('div');
-        Object.assign(box.style, {
-            background: '#141414', border: '1px solid #2a2a2a',
-            borderRadius: '20px', padding: '24px', maxWidth: '340px',
-            width: '90%', textAlign: 'center', color: '#ccc',
-            fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-            boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
-        });
-        const h = document.createElement('h3');
-        h.textContent = title;
-        Object.assign(h.style, { margin: '0 0 12px', fontSize: '15px', fontWeight: '600', color: '#fff' });
-        const status = document.createElement('p');
-        status.textContent = 'Starting...';
-        Object.assign(status.style, { margin: '0 0 16px', fontSize: '13px', color: '#999' });
-        const stopBtn = document.createElement('button');
-        stopBtn.textContent = 'Stop';
-        Object.assign(stopBtn.style, {
-            padding: '6px 18px', borderRadius: '12px', border: '1px solid #666',
-            fontSize: '13px', fontWeight: '500', cursor: 'pointer',
-            background: 'transparent', color: '#ccc',
-        });
-        stopBtn.onmouseenter = () => { stopBtn.style.background = 'rgba(255,255,255,0.1)'; };
-        stopBtn.onmouseleave = () => { stopBtn.style.background = 'transparent'; };
-        stopBtn.onclick = () => {
-            ge_stopRequested = true;
-            status.textContent = 'Stopping...';
-            stopBtn.disabled = true;
-            stopBtn.style.opacity = '0.5';
-        };
-        box.appendChild(h);
-        box.appendChild(status);
-        box.appendChild(stopBtn);
-        overlay.appendChild(box);
-        document.body.appendChild(overlay);
-        return {
-            update(msg) { if (!ge_stopRequested) status.textContent = msg; },
-            close() { overlay.remove(); },
-        };
-    }
-
-    // ── API-based item fetching ──────────────────────────────────
-    // Extract file IDs from the page DOM as fallback (href="/files?file=UUID")
-    function ge_extractFileIdsFromDOM() {
-        const ids = [];
-        for (const a of document.querySelectorAll('a[href*="/files?file="]')) {
-            if (a.closest('nav, [data-testid="sidebar"]')) continue;
-            const url = new URL(a.href, window.location.origin);
-            const fid = url.searchParams.get('file');
-            if (fid && !ids.includes(fid)) ids.push(fid);
-        }
-        return ids;
-    }
-
-    async function ge_fetchFilesList() {
-        const endpoints = [
-            '/rest/app-chat/files',
-            '/rest/media/files',
-            '/rest/app-chat/file',
-            '/api/files',
-        ];
-        for (const ep of endpoints) {
-            try {
-                const r = await _originalFetch(ep, { method: 'GET', credentials: 'include', headers: { 'Accept': 'application/json' } });
-                if (!r.ok) { logDebug('ge_fetchFilesList', r.status, 'at', ep); continue; }
-                const data = await r.json();
-                logDebug('ge_fetchFilesList response from', ep, ':', JSON.stringify(data).slice(0, 300));
-                const arr = Array.isArray(data) ? data : (data.files || data.items || data.results || data.data || []);
-                const ids = arr.map(f => f.fileId || f.file_id || f.id || f.name).filter(Boolean);
-                if (ids.length > 0) return ids;
-            } catch (e) { logDebug('ge_fetchFilesList error at', ep, ':', e); }
-        }
-        // Fallback: extract from DOM
-        const domIds = ge_extractFileIdsFromDOM();
-        logDebug('ge_fetchFilesList DOM fallback found:', domIds.length, 'files');
-        return domIds;
-    }
-
-    let _ge_sniffedDeleteEndpoint = null; // populated by fetch interceptor when Grok performs a delete
-
-    async function ge_deleteFile(fileId) {
-        const candidates = [
-            _ge_sniffedDeleteEndpoint ? _ge_sniffedDeleteEndpoint.replace('<id>', fileId) : null,
-            `/rest/app-chat/files/${fileId}`,
-            `/rest/media/files/${fileId}`,
-            `/rest/app-chat/file/${fileId}`,
-            `/api/files/${fileId}`,
-        ].filter(Boolean);
-        for (const ep of candidates) {
-            try {
-                const r = await _originalFetch(ep, { method: 'DELETE', credentials: 'include', headers: { 'Accept': 'application/json' } });
-                if (r.ok) { logDebug('[Deleter] delete ok via', ep); return true; }
-                logDebug('[Deleter] delete', r.status, 'via', ep);
-            } catch (_) {}
-        }
-        return false;
-    }
-
-    async function ge_fetchShareLinks() {
-        try {
-            const r = await _originalFetch('/rest/app-chat/shared-conversations', { method: 'GET', credentials: 'include', headers: { 'Accept': 'application/json' } });
-            if (!r.ok) throw new Error(`HTTP ${r.status}`);
-            const data = await r.json();
-            const arr = Array.isArray(data) ? data : (data.sharedConversations || data.shared_conversations || data.links || data.items || data.results || []);
-            return arr.map(s => s.conversationId || s.conversation_id || s.shareId || s.share_id || s.id).filter(Boolean);
-        } catch (e) { logDebug('ge_fetchShareLinks error:', e); return []; }
-    }
-
-    async function ge_deleteShareLink(id) {
-        try {
-            let r = await _originalFetch(`/rest/app-chat/shared-conversations/${id}`, { method: 'DELETE', credentials: 'include', headers: { 'Accept': 'application/json' } });
-            if (r.ok) return true;
-            r = await _originalFetch(`/rest/app-chat/conversations/${id}/share`, { method: 'DELETE', credentials: 'include', headers: { 'Accept': 'application/json' } });
-            return r.ok;
-        } catch (_) { return false; }
-    }
-
-    async function ge_fetchDeletedConversations() {
-        try {
-            const r = await _originalFetch('/rest/app-chat/conversations/deleted', { method: 'GET', credentials: 'include', headers: { 'Accept': 'application/json' } });
-            if (!r.ok) throw new Error(`HTTP ${r.status}`);
-            const data = await r.json();
-            const arr = Array.isArray(data) ? data : (data.conversations || data.deletedConversations || data.deleted_conversations || data.items || data.results || []);
-            return arr.map(c => c.conversationId || c.conversation_id || c.id).filter(Boolean);
-        } catch (e) { logDebug('ge_fetchDeletedConversations error:', e); return []; }
-    }
-
-    async function ge_permanentlyDeleteConversation(id) {
-        try {
-            let r = await _originalFetch(`/rest/app-chat/conversations/${id}/permanent`, { method: 'DELETE', credentials: 'include', headers: { 'Accept': 'application/json' } });
-            if (r.ok) return true;
-            r = await _originalFetch(`/rest/app-chat/conversations/${id}`, { method: 'DELETE', credentials: 'include', headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify({ permanent: true }) });
-            return r.ok;
-        } catch (_) { return false; }
-    }
-
-    // ── UI-based fallback deletion ────────────────────────────────
-    // These functions ONLY operate on the correct content area for the
-    // current page type — never touching sidebar conversations.
-
-    function ge_getContentArea(pageType) {
-        const hrefMap = { files: '/files', shareLinks: '/share-links', deletedConversations: '/deleted-conversations' };
-        const targetHref = hrefMap[pageType];
-
-        // Find h2 with a link to the page — definitive page title
-        for (const a of document.querySelectorAll(`h2 a[href="${targetHref}"]`)) {
-            const h2 = a.closest('h2');
-            if (!h2 || h2.closest('nav, [data-testid="sidebar"]')) continue;
-            let panel = h2;
-            for (let i = 0; i < 10 && panel; i++) {
-                panel = panel.parentElement;
-                if (!panel) break;
-                const cls = panel.className || '';
-                if (cls.includes('flex-1') || cls.includes('flex-grow') || panel.offsetWidth > 500) return panel;
-            }
-        }
-        return document.querySelector('main, [role="main"]') || document.body;
-    }
-
-    async function ge_handleGrokConfirm() {
-        await ge_delay(150);
-        if (ge_stopRequested) return false;
-        for (const d of document.querySelectorAll('[role="alertdialog"], [role="dialog"]')) {
-            if (d.closest('[data-ge-deleter]') || d.closest('[data-ge-progress]')) continue;
-            for (const b of d.querySelectorAll('button')) {
-                const t = b.textContent.toLowerCase().trim();
-                if (t === 'delete' || t === 'confirm' || t === 'yes' || t === 'remove' || t.includes('permanently') || t.includes('force')) {
-                    b.click(); await ge_delay(100); return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    // For deleted convos: find cards with "Restore" and "Force Delete" buttons
-    // The DOM structure is: div.flex.justify-between.items-center.p-2.border.rounded-xl.bg-card
-    //   > span.truncate (conversation title)
-    //   > div.flex.gap-2 > button(Restore), button(Force Delete)
-    function ge_findDeletedConvoCards(contentArea) {
-        if (!contentArea) return [];
-        const cards = [];
-        for (const card of contentArea.querySelectorAll('div.border.rounded-xl')) {
-            if (card.closest('nav, [data-testid="sidebar"], #ge-panel, #ge-fab, [data-ge-progress]')) continue;
-            if (card.hasAttribute('data-ge-deleter')) continue;
-            const btns = card.querySelectorAll('button');
-            let forceDeleteBtn = null;
-            for (const b of btns) {
-                const t = b.textContent.trim().toLowerCase();
-                if (t === 'force delete' || t.includes('force delete')) { forceDeleteBtn = b; break; }
-            }
-            if (forceDeleteBtn) cards.push({ card, forceDeleteBtn });
-        }
-        return cards;
-    }
-
-    // For deleted convos: find cards with Restore buttons for Restore All
-    function ge_findRestoreCards(contentArea) {
-        if (!contentArea) return [];
-        const cards = [];
-        for (const card of contentArea.querySelectorAll('div.border.rounded-xl')) {
-            if (card.closest('nav, [data-testid="sidebar"], #ge-panel, #ge-fab, [data-ge-progress]')) continue;
-            if (card.hasAttribute('data-ge-deleter')) continue;
-            const btns = card.querySelectorAll('button');
-            let restoreBtn = null;
-            for (const b of btns) {
-                const t = b.textContent.trim().toLowerCase();
-                if (t === 'restore') { restoreBtn = b; break; }
-            }
-            if (restoreBtn) cards.push({ card, restoreBtn });
-        }
-        return cards;
-    }
-
-    // For files page: find file items by their link hrefs (searches whole document)
-    function ge_findFileItems() {
-        const items = [];
-        for (const a of document.querySelectorAll('a[href*="/files?file="]')) {
-            if (a.closest('nav, [data-testid="sidebar"], #ge-panel, #ge-fab, [data-ge-progress]')) continue;
-            // Delete button may be inside <a> OR a sibling inside the parent container
-            const container = a.closest('[class*="group"], li, [class*="file-item"], [class*="item"], [class*="row"]') || a.parentElement;
-            const btn = a.querySelector('button[aria-label="Delete file"]')
-                || (container && container.querySelector('button[aria-label="Delete file"]'))
-                || (container && container.querySelector('button[aria-label*="elete" i]'))
-                || (container && container.querySelector('button[aria-label*="emove" i]'));
-            if (btn) items.push({ link: a, btn, key: a.getAttribute('href') || a.href });
-        }
-        return items;
-    }
-
-    async function ge_uiFallbackDelete(pageType) {
-        const contentArea = ge_getContentArea(pageType);
-        let total = 0;
-        let emptyRounds = 0;
-        const _attempted = new Set(); // track attempted items to avoid infinite loops
-
-        for (let i = 0; i < 500; i++) {
-            if (ge_stopRequested) break;
-
-            // ── Deleted conversations: click "Force Delete" buttons on cards ──
-            if (pageType === 'deletedConversations') {
-                const cards = ge_findDeletedConvoCards(contentArea);
-                if (cards.length > 0) {
-                    cards[0].forceDeleteBtn.click();
-                    await ge_delay(150);
-                    if (ge_stopRequested) break;
-                    await ge_handleGrokConfirm();
-                    await ge_delay(200);
-                    total++;
-                    emptyRounds = 0;
-                    continue;
-                }
-                emptyRounds++;
-                if (emptyRounds >= 3) break;
-                await ge_delay(200);
-                continue;
-            }
-
-            // ── Files page: hover file link to reveal button, then click ──
-            if (pageType === 'files') {
-                const fileItems = ge_findFileItems();
-                // Find the first file we haven't already tried
-                let target = null;
-                for (const fi of fileItems) {
-                    const href = fi.link.getAttribute('href') || fi.link.href || '';
-                    if (!_attempted.has(href)) { target = { ...fi, href }; break; }
-                }
-                if (target) {
-                    _attempted.add(target.href);
-                    const { link, btn } = target;
-                    link.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
-                    link.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-                    btn.style.setProperty('width', '32px', 'important');
-                    btn.style.setProperty('display', 'flex', 'important');
-                    btn.style.setProperty('opacity', '1', 'important');
-                    btn.style.setProperty('padding', '4px', 'important');
-                    await ge_delay(100);
-                    btn.click();
-                    await ge_delay(200);
-                    if (ge_stopRequested) break;
-                    await ge_handleGrokConfirm();
-                    await ge_delay(200);
-                    total++;
-                    emptyRounds = 0;
-                    continue;
-                }
-                emptyRounds++;
-                if (emptyRounds >= 3) break;
-                await ge_delay(200);
-                continue;
-            }
-
-            // ── Share links: similar approach ──
-            // Look for direct unshare/delete/revoke buttons on items
-            let acted = false;
-            for (const b of contentArea.querySelectorAll('button')) {
-                if (b.hasAttribute('data-ge-deleter') || b.closest('#ge-panel, #ge-fab, [data-ge-progress]')) continue;
-                if (b.closest('nav, [data-testid="sidebar"], [class*="sidebar"]')) continue;
-                if (b.closest('[class*="h-header-height"]')) continue;
-                const label = (b.getAttribute('aria-label') || '').toLowerCase();
-                const text = b.textContent.trim().toLowerCase();
-                if (label.includes('delete') || label.includes('unshare') || label.includes('revoke') || label.includes('remove')
-                    || text === 'delete' || text === 'unshare' || text === 'revoke' || text === 'remove') {
-                    b.click();
-                    await ge_delay(150);
-                    if (ge_stopRequested) break;
-                    await ge_handleGrokConfirm();
-                    await ge_delay(200);
-                    total++;
-                    emptyRounds = 0;
-                    acted = true;
-                    break;
-                }
-            }
-            if (acted) continue;
-
-            emptyRounds++;
-            if (emptyRounds >= 3) break;
-            await ge_delay(200);
-        }
-        return total;
-    }
-
-    // ── Restore All orchestrator for deleted conversations ──────
-    async function ge_restoreAllOnPage() {
-        if (ge_isRunning) return;
-        ge_isRunning = true;
-        ge_stopRequested = false;
-
-        const confirmed = await ge_showConfirm('Restore All Conversations', 'This will restore all deleted conversations back to your conversation list.');
-        if (!confirmed) { ge_isRunning = false; return; }
-
-        const progress = ge_showProgress('Restoring All...');
-        let total = 0;
-        const contentArea = ge_getContentArea('deletedConversations');
-
-        for (let i = 0; i < 500; i++) {
-            if (ge_stopRequested) break;
-            const cards = ge_findRestoreCards(contentArea);
-            if (cards.length === 0) break;
-            progress.update(`Restoring conversation ${total + 1}...`);
-            cards[0].restoreBtn.click();
-            await ge_delay(200);
-            if (ge_stopRequested) break;
-            await ge_handleGrokConfirm();
-            await ge_delay(150);
-            total++;
-        }
-
-        progress.close();
-        ge_isRunning = false;
-        const stopped = ge_stopRequested ? ' (stopped by user)' : '';
-        ge_stopRequested = false;
-        panelAddLog(`Deleter: Restored ${total} conversations${stopped}`);
-        if (total > 0) { await ge_delay(500); window.location.reload(); }
-    }
-
-    // ── Main delete orchestrator ─────────────────────────────────
-    async function ge_deleteAllOnPage(pageType) {
-        if (ge_isRunning) return; // prevent double-runs
-        ge_isRunning = true;
-        ge_stopRequested = false;
-
-        const titles = { files: 'Delete All Files', shareLinks: 'Delete All Shared Links', deletedConversations: 'Permanently Delete All' };
-        const descs = {
-            files: 'This will delete all uploaded files on this page. This cannot be undone.',
-            shareLinks: 'This will delete all shared links and revoke access. This cannot be undone.',
-            deletedConversations: 'This will permanently delete all conversations in the trash. This cannot be undone.',
-        };
-        const confirmed = await ge_showConfirm(titles[pageType] || 'Delete All', descs[pageType] || 'This cannot be undone.');
-        if (!confirmed) { ge_isRunning = false; return; }
-
-        const progress = ge_showProgress(titles[pageType] || 'Deleting...');
-        let total = 0, failed = 0;
-
-        try {
-            // ── Try API-based deletion first ──
-            if (pageType === 'files' && !ge_stopRequested) {
-                progress.update('Fetching file list...');
-                const ids = await ge_fetchFilesList();
-                if (ids.length > 0) {
-                    for (let i = 0; i < ids.length; i++) {
-                        if (ge_stopRequested) break;
-                        progress.update(`Deleting file ${i + 1} of ${ids.length}...`);
-                        const ok = await ge_deleteFile(ids[i]);
-                        if (ok) total++; else failed++;
-                        await ge_delay(50);
-                    }
-                }
-            } else if (pageType === 'shareLinks' && !ge_stopRequested) {
-                progress.update('Fetching shared links...');
-                const ids = await ge_fetchShareLinks();
-                if (ids.length > 0) {
-                    for (let i = 0; i < ids.length; i++) {
-                        if (ge_stopRequested) break;
-                        progress.update(`Revoking link ${i + 1} of ${ids.length}...`);
-                        const ok = await ge_deleteShareLink(ids[i]);
-                        if (ok) total++; else failed++;
-                        await ge_delay(50);
-                    }
-                }
-            } else if (pageType === 'deletedConversations' && !ge_stopRequested) {
-                progress.update('Fetching deleted conversations...');
-                const ids = await ge_fetchDeletedConversations();
-                if (ids.length > 0) {
-                    for (let i = 0; i < ids.length; i++) {
-                        if (ge_stopRequested) break;
-                        progress.update(`Permanently deleting ${i + 1} of ${ids.length}...`);
-                        const ok = await ge_permanentlyDeleteConversation(ids[i]);
-                        if (ok) total++; else failed++;
-                        await ge_delay(50);
-                    }
-                }
-            }
-
-            // ── If API got nothing and not stopped, try UI-based fallback ──
-            if (total === 0 && !ge_stopRequested) {
-                progress.update('Trying UI-based deletion...');
-                await ge_delay(150);
-                const uiCount = await ge_uiFallbackDelete(pageType);
-                total += uiCount;
-            }
-        } catch (e) {
-            logDebug('ge_deleteAllOnPage error:', e);
-        }
-
-        progress.close();
-        ge_isRunning = false;
-
-        const stopped = ge_stopRequested ? ' (stopped by user)' : '';
-        ge_stopRequested = false;
-
-        const msg = total > 0
-            ? `Deleted ${total} items` + (failed > 0 ? ` (${failed} failed)` : '') + stopped
-            : 'No items found or deletion failed' + stopped;
-        panelAddLog(`Deleter: ${msg} (${pageType})`);
-
-        // Refresh the page to reflect changes
-        if (total > 0) {
-            await ge_delay(500);
-            window.location.reload();
-        }
-    }
-
-    // ── Button creation ──────────────────────────────────────────
-    function ge_createHeaderDeleteBtn(pageType) {
-        const btn = document.createElement('button');
-        btn.setAttribute('data-slot', 'button');
-        btn.setAttribute('data-ge-deleter', 'true');
-        btn.setAttribute('data-ge-page', pageType);
-        btn.className = 'inline-flex items-center justify-center whitespace-nowrap text-sm font-medium leading-[normal] cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring transition-colors duration-100 select-none text-fg-secondary hover:bg-button-ghost-hover hover:text-fg-primary border border-transparent h-8 rounded-xl gap-1.5 overflow-hidden px-2 py-1.5';
-        btn.type = 'button';
-        btn.title = 'Delete all items';
-        btn.style.cssText = 'color:#f87171;';
-        btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg><span style="font-size:12px;">Delete All</span>';
-        btn.onmouseenter = () => { btn.style.background = 'rgba(248,113,113,0.1)'; };
-        btn.onmouseleave = () => { btn.style.background = 'transparent'; };
-        btn.addEventListener('click', (e) => { e.stopPropagation(); ge_deleteAllOnPage(pageType); });
-        return btn;
-    }
-
-    function ge_createHeaderRestoreBtn() {
-        const btn = document.createElement('button');
-        btn.setAttribute('data-slot', 'button');
-        btn.setAttribute('data-ge-deleter', 'true');
-        btn.setAttribute('data-ge-page', 'restoreAll');
-        btn.className = 'inline-flex items-center justify-center whitespace-nowrap text-sm font-medium leading-[normal] cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring transition-colors duration-100 select-none text-fg-secondary hover:bg-button-ghost-hover hover:text-fg-primary border border-transparent h-8 rounded-xl gap-1.5 overflow-hidden px-2 py-1.5';
-        btn.type = 'button';
-        btn.title = 'Restore all deleted conversations';
-        btn.style.cssText = 'color:#60a5fa;';
-        btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg><span style="font-size:12px;">Restore All</span>';
-        btn.onmouseenter = () => { btn.style.background = 'rgba(96,165,250,0.1)'; };
-        btn.onmouseleave = () => { btn.style.background = 'transparent'; };
-        btn.addEventListener('click', (e) => { e.stopPropagation(); ge_restoreAllOnPage(); });
-        return btn;
-    }
-
-    // ── Page & settings injection ────────────────────────────────
-    function ge_injectPageButtons() {
-        const path = window.location.pathname;
-        let pageType = null;
-        if (path === '/files' || path.startsWith('/files/')) pageType = 'files';
-        else if (path === '/share-links' || path.startsWith('/share-links/')) pageType = 'shareLinks';
-        else if (path === '/deleted-conversations' || path.startsWith('/deleted-conversations/')) pageType = 'deletedConversations';
-        if (!pageType) return;
-
-        // Already injected for this page?
-        if (document.querySelector(`[data-ge-deleter][data-ge-page="${pageType}"]`)) return;
-
-        // Find the correct heading for this page type (NOT in the sidebar)
-        const hrefMap = { files: '/files', shareLinks: '/share-links', deletedConversations: '/deleted-conversations' };
-        const titleMap = { files: 'Files', shareLinks: 'Shared Links', deletedConversations: 'Deleted Conversations' };
-        const targetHref = hrefMap[pageType];
-
-        // Strategy 1: Find h2 > a[href="/<page>"] — this is the definitive page title
-        for (const a of document.querySelectorAll(`h2 a[href="${targetHref}"]`)) {
-            const h2 = a.closest('h2');
-            if (!h2) continue;
-            // Make sure this h2 is NOT inside the sidebar/nav
-            if (h2.closest('nav, [data-testid="sidebar"]')) continue;
-
-            // The h2 is inside a flex justify-between div; get that div
-            const justifyDiv = h2.closest('.flex.justify-between') || h2.parentElement;
-            if (!justifyDiv) continue;
-
-            // Look for the button group (div.flex.gap-1) that contains collapse/search buttons
-            const btnGroup = justifyDiv.querySelector('div.flex.gap-1');
-            if (btnGroup && !btnGroup.querySelector('[data-ge-deleter]')) {
-                btnGroup.prepend(ge_createHeaderDeleteBtn(pageType));
-                if (pageType === 'deletedConversations') btnGroup.prepend(ge_createHeaderRestoreBtn());
-                return;
-            }
-            // Fallback: append to the justifyDiv itself
-            if (pageType === 'deletedConversations') justifyDiv.appendChild(ge_createHeaderRestoreBtn());
-            justifyDiv.appendChild(ge_createHeaderDeleteBtn(pageType));
-            return;
-        }
-
-        // Strategy 2: Look for heading text that matches
-        const expectedTitle = titleMap[pageType];
-        for (const h of document.querySelectorAll('h1, h2, h3')) {
-            if (h.closest('nav, [data-testid="sidebar"]')) continue;
-            const text = h.textContent.trim();
-            if (text === expectedTitle || text.startsWith(expectedTitle)) {
-                const row = h.closest('.flex.justify-between') || h.closest('.flex') || h.parentElement;
-                if (row && !row.querySelector('[data-ge-deleter]')) {
-                    if (pageType === 'deletedConversations') row.appendChild(ge_createHeaderRestoreBtn());
-                    row.appendChild(ge_createHeaderDeleteBtn(pageType));
-                    return;
-                }
-            }
-        }
-    }
-
-    function ge_injectSettingsButtons() {
-        // No Delete All buttons in settings at all — they only appear on their own pages
-        // This function intentionally left minimal
-    }
-
-    let _ge_deleterTimer = null;
-    function ge_scheduleDeleterInjection() {
-        clearTimeout(_ge_deleterTimer);
-        _ge_deleterTimer = setTimeout(() => {
-            if (!featureDeleter) return;
-            ge_injectPageButtons();
-            ge_injectSettingsButtons();
-        }, 300);
-    }
-
-    function ge_checkPendingDelete() {
-        const pending = getState('GrokEnhancer_PendingDelete', null);
-        if (pending) {
-            localStorage.removeItem('GrokEnhancer_PendingDelete');
-            setTimeout(() => ge_deleteAllOnPage(pending), 2000);
-        }
-    }
-
-    // ══════════════════════════════════════════════════════════════
     //  6. Settings Panel UI  (Grok-themed, compact)
     // ══════════════════════════════════════════════════════════════
     let panelStatusEl = null;
     let panelOpen = false;
 
-    function panelAddLog() { /* removed — no-op */ }
+    function panelAddLog(...a) { logDebug(...a); }
 
     function panelUpdateStatus(mr, isRecovering = false) {
         if (!panelStatusEl) return;
@@ -2497,6 +2671,28 @@
             /* Visited link styling for clickable links */
             a.ge-link { color: #4a9eff !important; }
             a.ge-link:visited { color: #9b59b6 !important; }
+
+            /* Dropdown for grouped toggles (Hide Models) */
+            #ge-panel .ge-dropdown-trigger {
+                font-size: 11px; color: #888; cursor: pointer; user-select: none;
+                padding: 2px 6px; border: 1px solid #2a2a2a; border-radius: 6px;
+                background: #1a1a1a; max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+            }
+            #ge-panel .ge-dropdown {
+                display: none; flex-direction: column; gap: 6px;
+                margin: 2px -6px 2px; padding: 6px 8px;
+                background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 8px;
+            }
+            #ge-panel .ge-dropdown.open { display: flex; }
+            #ge-panel .ge-dropdown .ge-row { padding: 0; }
+
+            /* Mobile: raise the FAB above Grok's send button (tune this
+               offset if a given phone's composer height differs). */
+            @media (max-width: 768px) {
+                #ge-fab { bottom: 80px; }
+                #ge-panel { bottom: 120px; }
+                .ge-hotkey-row { display: none; }
+            }
         `;
         document.head.appendChild(style);
     }
@@ -2522,6 +2718,152 @@
         return { row, input };
     }
 
+    function createModelDropdown() {
+        const wrapper = document.createElement('div');
+        wrapper.style.display = 'flex';
+        wrapper.style.flexDirection = 'column';
+
+        const row = document.createElement('div');
+        row.className = 'ge-row';
+        const lbl = document.createElement('span');
+        lbl.className = 'ge-label';
+        lbl.textContent = 'Hide Models';
+        const trigger = document.createElement('span');
+        trigger.className = 'ge-dropdown-trigger';
+
+        const dropdown = document.createElement('div');
+        dropdown.className = 'ge-dropdown';
+
+        function updateSummary() {
+            const names = [];
+            if (featureHideHeavy) names.push('Heavy');
+            if (featureHideExpert) names.push('Expert');
+            if (featureHideAuto) names.push('Auto');
+            trigger.textContent = names.length ? names.join(', ') : 'None';
+        }
+
+        const heavyToggle = createToggle('Heavy', featureHideHeavy, (on) => {
+            featureHideHeavy = on; setState('GrokEnhancer_HideHeavy', on);
+            ge_markModelItems(); ge_markUpgradeHeavyBtns(); updateSummary();
+            panelAddLog(`Hide Heavy Model ${on ? 'ON' : 'OFF'}`);
+        });
+        const expertToggle = createToggle('Expert', featureHideExpert, (on) => {
+            featureHideExpert = on; setState('GrokEnhancer_HideExpert', on);
+            ge_markModelItems(); updateSummary();
+            panelAddLog(`Hide Expert Model ${on ? 'ON' : 'OFF'}`);
+        });
+        const autoToggle = createToggle('Auto', featureHideAuto, (on) => {
+            featureHideAuto = on; setState('GrokEnhancer_HideAuto', on);
+            ge_markModelItems(); updateSummary();
+            panelAddLog(`Hide Auto Model ${on ? 'ON' : 'OFF'}`);
+        });
+
+        dropdown.appendChild(heavyToggle.row);
+        dropdown.appendChild(expertToggle.row);
+        dropdown.appendChild(autoToggle.row);
+
+        // Keep the dropdown open when clicking toggles inside it; only a click outside
+        // or on the trigger should close it.
+        dropdown.addEventListener('click', (e) => e.stopPropagation());
+
+        trigger.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const isOpen = dropdown.classList.contains('open');
+            document.querySelectorAll('#ge-panel .ge-dropdown.open').forEach(d => {
+                if (d !== dropdown && !d.contains(dropdown) && !dropdown.contains(d)) d.classList.remove('open');
+            });
+            dropdown.classList.toggle('open', !isOpen);
+        });
+        document.addEventListener('click', (e) => {
+            if (!wrapper.contains(e.target)) dropdown.classList.remove('open');
+        });
+
+        row.appendChild(lbl);
+        row.appendChild(trigger);
+        wrapper.appendChild(row);
+        wrapper.appendChild(dropdown);
+        updateSummary();
+        return wrapper;
+    }
+
+    // Collapsible group of rows, reusing the same trigger/dropdown widget as
+    // createModelDropdown() so the panel doesn't need a second UI pattern.
+    function createSection(title, rowEls) {
+        const wrapper = document.createElement('div');
+        wrapper.style.display = 'flex';
+        wrapper.style.flexDirection = 'column';
+
+        const header = document.createElement('div');
+        header.className = 'ge-row';
+        header.style.cursor = 'pointer';
+        const lbl = document.createElement('span');
+        lbl.className = 'ge-label';
+        lbl.style.fontWeight = '600';
+        lbl.textContent = title;
+        const trigger = document.createElement('span');
+        trigger.className = 'ge-dropdown-trigger';
+        trigger.textContent = '▸';
+
+        const dropdown = document.createElement('div');
+        dropdown.className = 'ge-dropdown';
+        rowEls.forEach(el => dropdown.appendChild(el));
+
+        // Don't collapse the section when the user clicks controls inside it.
+        dropdown.addEventListener('click', (e) => e.stopPropagation());
+
+        header.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const isOpen = dropdown.classList.contains('open');
+            document.querySelectorAll('#ge-panel .ge-dropdown.open').forEach(d => {
+                if (d !== dropdown && !d.contains(dropdown) && !dropdown.contains(d)) d.classList.remove('open');
+            });
+            dropdown.classList.toggle('open', !isOpen);
+            trigger.textContent = isOpen ? '▸' : '▾';
+        });
+        document.addEventListener('click', (e) => {
+            if (!wrapper.contains(e.target)) { dropdown.classList.remove('open'); trigger.textContent = '▸'; }
+        });
+
+        header.appendChild(lbl);
+        header.appendChild(trigger);
+        wrapper.appendChild(header);
+        wrapper.appendChild(dropdown);
+        return wrapper;
+    }
+
+    // Toggles that all follow the same shape (assign var, persist, optional
+    // side effect, optional log) — driven from one loop instead of being
+    // repeated inline for each one.
+    const GE_SIMPLE_TOGGLES = [
+        { label: 'SuperGrok Logo', get: () => featureLogo, stateKey: 'GrokEnhancer_Logo',
+          onToggle: (on) => { featureLogo = on; if (!on) logoReplaced = false; else { logoReplaced = false; tryReplaceLogo(); } } },
+        { label: 'Clickable Links', get: () => featureLinks, stateKey: 'GrokEnhancer_Links',
+          onToggle: (on) => { featureLinks = on; } },
+        { label: 'DeMod', get: () => featureDeMod, stateKey: 'GrokDeModEnabled',
+          onToggle: (on) => { featureDeMod = on; } },
+        { label: 'Hide Share Button', get: () => featureHideShare, stateKey: 'GrokEnhancer_HideShare',
+          onToggle: (on) => { featureHideShare = on; applyShareHide(on); } },
+        { label: 'Hide Popups', get: () => featureHidePopups, stateKey: 'GrokEnhancer_HidePopups',
+          onToggle: (on) => { featureHidePopups = on; ge_applyPopupHideCSS(on); } },
+        { label: 'Hide Premium Upsells', get: () => featureHidePremium, stateKey: 'GrokEnhancer_HidePremium',
+          onToggle: (on) => { featureHidePremium = on; ge_applyPremiumHideCSS(on); if (on) ge_dismissPremium(); } },
+        { label: 'Auto Private Chat', get: () => featureAutoPrivate, stateKey: 'GrokEnhancer_AutoPrivate',
+          onToggle: (on) => { featureAutoPrivate = on; if (on) ge_autoEnablePrivateMode(); }, noLog: true },
+        { label: 'Disable Auto Scroll', get: () => featureDisableAutoScroll, stateKey: 'GrokEnhancer_DisableAutoScroll',
+          onToggle: (on) => { featureDisableAutoScroll = on; ge_enforceAutoScrollDisable(); } },
+        { label: 'Debug', get: () => featureDebug, stateKey: 'GrokDeModDebug',
+          onToggle: (on) => { featureDebug = on; }, noLog: true },
+    ];
+
+    function ge_buildSimpleToggleRow(label) {
+        const cfg = GE_SIMPLE_TOGGLES.find(t => t.label === label);
+        return createToggle(cfg.label, cfg.get(), (on) => {
+            cfg.onToggle(on);
+            setState(cfg.stateKey, on);
+            if (!cfg.noLog) panelAddLog(`${cfg.label} ${on ? 'ON' : 'OFF'}`);
+        }).row;
+    }
+
     function setupPanel() {
         injectPanelCSS();
 
@@ -2536,11 +2878,21 @@
         // ── Triple-click to hide FAB ─────────────────────────────
         function _ge_handleFabTripleClick() {
             _ge_fabHidden = true;
-            setState('GrokEnhancer_FabHidden', true);
+            if (featureFabStayHidden) setState('GrokEnhancer_FabHidden', true);
             fab.style.display = 'none';
             panelOpen = false;
             panel.classList.remove('open');
             logDebug('[FAB] Hidden via triple-click');
+        }
+
+        function _ge_reallyTogglePanel() {
+            panelOpen = !panelOpen;
+            panel.classList.toggle('open', panelOpen);
+            fab.title = panelOpen ? 'Close settings' : 'Grok Enhancer Settings';
+            fab.classList.remove('ge-spinning');
+            void fab.offsetWidth;
+            fab.classList.add('ge-spinning');
+            fab.addEventListener('animationend', () => fab.classList.remove('ge-spinning'), { once: true });
         }
 
         fab.addEventListener('click', (e) => {
@@ -2554,13 +2906,7 @@
                 _ge_handleFabTripleClick();
                 return;
             }
-            panelOpen = !panelOpen;
-            panel.classList.toggle('open', panelOpen);
-            fab.title = panelOpen ? 'Close settings' : 'Grok Enhancer Settings';
-            fab.classList.remove('ge-spinning');
-            void fab.offsetWidth;
-            fab.classList.add('ge-spinning');
-            fab.addEventListener('animationend', () => fab.classList.remove('ge-spinning'), { once: true });
+            _ge_reallyTogglePanel();
         });
 
         // Restore FAB via triple-click on bottom-right corner area
@@ -2576,7 +2922,7 @@
                     if (_ge_fabClicks.length >= 3) {
                         _ge_fabClicks = [];
                         _ge_fabHidden = false;
-                        setState('GrokEnhancer_FabHidden', false);
+                        if (featureFabStayHidden) setState('GrokEnhancer_FabHidden', false);
                         fab.style.display = '';
                         logDebug('[FAB] Restored via triple-click');
                     }
@@ -2606,96 +2952,8 @@
         const section = document.createElement('div');
         section.className = 'ge-section';
 
-        // SuperGrok Logo toggle
-        section.appendChild(createToggle('SuperGrok Logo', featureLogo, (on) => {
-            featureLogo = on; setState('GrokEnhancer_Logo', on);
-            if (!on) logoReplaced = false; else { logoReplaced = false; tryReplaceLogo(); }
-            panelAddLog(`SuperGrok Logo ${on ? 'ON' : 'OFF'}`);
-        }).row);
-
-        // Clickable Links toggle
-        section.appendChild(createToggle('Clickable Links', featureLinks, (on) => {
-            featureLinks = on; setState('GrokEnhancer_Links', on);
-            panelAddLog(`Clickable Links ${on ? 'ON' : 'OFF'}`);
-        }).row);
-
-        // DeMod toggle
-        section.appendChild(createToggle('DeMod', featureDeMod, (on) => {
-            featureDeMod = on; setState('GrokDeModEnabled', on);
-            panelAddLog(`DeMod ${on ? 'ON' : 'OFF'}`);
-        }).row);
-
-        // Rate Limit Display toggle
-        section.appendChild(createToggle('Rate Limit', featureRateLimit, (on) => {
-            featureRateLimit = on; setState('GrokEnhancer_RateLimit', on);
-            if (!on) rl_removeExisting(); else if (rl_lastQueryBar) rl_fetchAndUpdate(rl_lastQueryBar, true);
-            panelAddLog(`Rate Limit ${on ? 'ON' : 'OFF'}`);
-        }).row);
-
-        // Hide Share Button toggle
-        section.appendChild(createToggle('Hide Share Button', featureHideShare, (on) => {
-            featureHideShare = on; setState('GrokEnhancer_HideShare', on);
-            applyShareHide(on);
-            panelAddLog(`Hide Share Button ${on ? 'ON' : 'OFF'}`);
-        }).row);
-
-        // Deleter toggle
-        section.appendChild(createToggle('Deleter', featureDeleter, (on) => {
-            featureDeleter = on; setState('GrokEnhancer_Deleter', on);
-            if (on) ge_scheduleDeleterInjection();
-            else document.querySelectorAll('[data-ge-deleter]').forEach(el => el.remove());
-            panelAddLog(`Deleter ${on ? 'ON' : 'OFF'}`);
-        }).row);
-
-        // Hide Popups toggle
-        section.appendChild(createToggle('Hide Popups', featureHidePopups, (on) => {
-            featureHidePopups = on; setState('GrokEnhancer_HidePopups', on);
-            ge_applyPopupHideCSS(on);
-            panelAddLog(`Hide Popups ${on ? 'ON' : 'OFF'}`);
-        }).row);
-
-        // Hide Premium Upsells toggle
-        section.appendChild(createToggle('Hide Premium Upsells', featureHidePremium, (on) => {
-            featureHidePremium = on; setState('GrokEnhancer_HidePremium', on);
-            ge_applyPremiumHideCSS(on);
-            if (on) ge_dismissPremium();
-            panelAddLog(`Hide Premium Upsells ${on ? 'ON' : 'OFF'}`);
-        }).row);
-
-        // Hide Heavy Model toggle
-        section.appendChild(createToggle('Hide Heavy Model', featureHideHeavy, (on) => {
-            featureHideHeavy = on; setState('GrokEnhancer_HideHeavy', on);
-            ge_applyHideHeavyCSS(on);
-            if (!on) {
-                document.querySelectorAll('[data-ge-hidden="heavy"]').forEach(el => el.removeAttribute('data-ge-hidden'));
-                document.querySelectorAll('[data-ge-hidden="upgrade-heavy"]').forEach(el => el.removeAttribute('data-ge-hidden'));
-            } else {
-                ge_markUpgradeHeavyBtns();
-            }
-            panelAddLog(`Hide Heavy Model ${on ? 'ON' : 'OFF'}`);
-        }).row);
-
-        // Auto Private Chat toggle
-        section.appendChild(createToggle('Auto Private Chat', featureAutoPrivate, (on) => {
-            featureAutoPrivate = on; setState('GrokEnhancer_AutoPrivate', on);
-            if (on) ge_autoEnablePrivateMode();
-        }).row);
-
-        // Streamer Mode toggle
-        section.appendChild(createToggle('Streamer Mode', featureStreamer, (on) => {
-            featureStreamer = on; setState('GrokEnhancer_Streamer', on);
-            ge_applyStreamerCSS(on);
-            if (on) ge_scanSidebarForSensitive();
-        }).row);
-
-        // Disable Auto Scroll toggle
-        section.appendChild(createToggle('Disable Auto Scroll', featureDisableAutoScroll, (on) => {
-            featureDisableAutoScroll = on; setState('GrokEnhancer_DisableAutoScroll', on);
-            ge_enforceAutoScrollDisable();
-            panelAddLog(`Disable Auto Scroll ${on ? 'ON' : 'OFF'}`);
-        }).row);
-
-        // Imagine Menu toggle
+        // ── Core (always visible) ──
+        section.appendChild(ge_buildSimpleToggleRow('SuperGrok Logo'));
         section.appendChild(createToggle('Imagine Menu', featureImagineMenu, (on) => {
             featureImagineMenu = on; setState('GrokEnhancer_ImagineMenu', on);
             const imFab = document.getElementById('ge-im-fab');
@@ -2709,13 +2967,198 @@
             }
             panelAddLog(`Imagine Menu ${on ? 'ON' : 'OFF'}`);
         }).row);
-
-        // Debug toggle
-        section.appendChild(createToggle('Debug', featureDebug, (on) => {
-            featureDebug = on; setState('GrokDeModDebug', on);
+        section.appendChild(ge_buildSimpleToggleRow('DeMod'));
+        section.appendChild(createToggle('Rate Limit', featureRateLimit, (on) => {
+            featureRateLimit = on; setState('GrokEnhancer_RateLimit', on);
+            if (!on) rl_removeExisting(); else if (rl_lastQueryBar) rl_fetchAndUpdate(rl_lastQueryBar, true);
+            panelAddLog(`Rate Limit ${on ? 'ON' : 'OFF'}`);
         }).row);
 
-        // Custom Styles button
+        // ── UI Cleanup ──
+        const followupsRow = createToggle('Hide Follow-up Prompts', featureHideFollowups, (on) => {
+            featureHideFollowups = on; setState('GrokEnhancer_HideFollowups', on);
+            if (!on) {
+                document.querySelectorAll('[data-ge-hidden="followups"]').forEach(el => el.removeAttribute('data-ge-hidden'));
+                document.querySelectorAll('[data-ge-followup-checked]').forEach(el => el.removeAttribute('data-ge-followup-checked'));
+            } else {
+                ge_markFollowupContainers();
+            }
+            panelAddLog(`Hide Follow-up Prompts ${on ? 'ON' : 'OFF'}`);
+        }).row;
+        const navHideRows = GE_SIDEBAR_NAV_HIDE_ITEMS.map(item => {
+            const stateKey = { build: 'GrokEnhancer_HideBuildNav', imagine: 'GrokEnhancer_HideImagineNav', skills: 'GrokEnhancer_HideSkillsNav' }[item.key];
+            return createToggle(`Hide ${item.label}`, item.get(), (on) => {
+                if (item.key === 'build') featureHideBuildNav = on;
+                else if (item.key === 'imagine') featureHideImagineNav = on;
+                else featureHideSkillsNav = on;
+                setState(stateKey, on);
+                ge_scanSidebarNavHide();
+                panelAddLog(`Hide ${item.label} ${on ? 'ON' : 'OFF'}`);
+            }).row;
+        });
+        section.appendChild(createSection('UI Cleanup', [
+            ge_buildSimpleToggleRow('Hide Share Button'),
+            ge_buildSimpleToggleRow('Hide Popups'),
+            ge_buildSimpleToggleRow('Hide Premium Upsells'),
+            followupsRow,
+            createModelDropdown(),
+            ...navHideRows,
+        ]));
+
+        // ── Privacy ──
+        const privacyToggle = createToggle('Privacy Mode', featurePrivacyMode, (on) => {
+            ge_requestPrivacyModeChange(on);
+        });
+        privacyToggle.input.id = 'ge-privacy-toggle-input';
+        const privacyBadge = document.createElement('span');
+        privacyBadge.id = 'ge-privacy-badge';
+        privacyBadge.style.cssText = 'color:#888;font-size:11px;';
+        privacyToggle.row.querySelector('.ge-label').appendChild(privacyBadge);
+
+        const privacyBlurToggle = createToggle('Blur Chats (instead of hide)', featurePrivacyBlur, (on) => {
+            featurePrivacyBlur = on;
+            setState('GrokEnhancer_PrivacyBlur', on);
+            ge_applyPrivacyCSS(featurePrivacyMode);
+            ge_updatePrivacyBadge();
+            panelAddLog(`Privacy Blur ${on ? 'ON' : 'OFF'}`);
+        });
+
+        const hideUsernameToggle = createToggle('Hide Username', featureHideUsername, (on) => {
+            featureHideUsername = on;
+            setState('GrokEnhancer_HideUsername', on);
+            ge_applyFooterPrivacyCSS();
+            panelAddLog(`Hide Username ${on ? 'ON' : 'OFF'}`);
+        });
+        const hideEmailToggle = createToggle('Hide Email', featureHideEmail, (on) => {
+            featureHideEmail = on;
+            setState('GrokEnhancer_HideEmail', on);
+            ge_applyFooterPrivacyCSS();
+            panelAddLog(`Hide Email ${on ? 'ON' : 'OFF'}`);
+        });
+        const hideAvatarToggle = createToggle('Hide Avatar', featureHideAvatar, (on) => {
+            featureHideAvatar = on;
+            setState('GrokEnhancer_HideAvatar', on);
+            ge_applyFooterPrivacyCSS();
+            panelAddLog(`Hide Avatar ${on ? 'ON' : 'OFF'}`);
+        });
+
+        const privacyWordsBtn = document.createElement('div');
+        privacyWordsBtn.className = 'ge-row';
+        const privacyWordsLabel = document.createElement('span');
+        privacyWordsLabel.className = 'ge-label';
+        privacyWordsLabel.textContent = 'Privacy Custom Words';
+        const privacyWordsOpenBtn = document.createElement('button');
+        privacyWordsOpenBtn.textContent = 'Manage';
+        privacyWordsOpenBtn.style.cssText = 'background:#333;color:#aaa;border:none;border-radius:4px;padding:2px 10px;font-size:11px;cursor:pointer;';
+        privacyWordsOpenBtn.addEventListener('click', () => ge_openPrivacyWordsEditor());
+        privacyWordsBtn.appendChild(privacyWordsLabel);
+        privacyWordsBtn.appendChild(privacyWordsOpenBtn);
+
+        const privacyHotkeyRow = document.createElement('div');
+        privacyHotkeyRow.className = 'ge-row ge-hotkey-row';
+        const privacyHotkeyLabel = document.createElement('span');
+        privacyHotkeyLabel.className = 'ge-label';
+        privacyHotkeyLabel.textContent = 'Panic Hotkey';
+        const privacyHotkeyBtn = document.createElement('button');
+        privacyHotkeyBtn.textContent = ge_formatHotkey(ge_privacyHotkey);
+        privacyHotkeyBtn.style.cssText = 'background:#333;color:#aaa;border:none;border-radius:4px;padding:2px 10px;font-size:11px;cursor:pointer;min-width:90px;';
+        privacyHotkeyBtn.addEventListener('click', () => {
+            privacyHotkeyBtn.textContent = 'Press keys…';
+            const capture = (e) => {
+                if (['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) return; // wait for a real key
+                e.preventDefault();
+                document.removeEventListener('keydown', capture, true);
+                ge_privacyHotkey = { ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, meta: e.metaKey, key: e.key };
+                setState('GrokEnhancer_StreamerHotkey', ge_privacyHotkey);
+                privacyHotkeyBtn.textContent = ge_formatHotkey(ge_privacyHotkey);
+            };
+            document.addEventListener('keydown', capture, true);
+        });
+        privacyHotkeyRow.appendChild(privacyHotkeyLabel);
+        privacyHotkeyRow.appendChild(privacyHotkeyBtn);
+
+        const privacyCategoryRows = Object.keys(GE_PRIVACY_CATEGORIES).map(key => {
+            const cat = GE_PRIVACY_CATEGORIES[key];
+            return createToggle(cat.label, ge_isPrivacyCategoryOn(key), (on) => {
+                ge_setPrivacyCategoryOn(key, on);
+                ge_rebuildPrivacyRegex();
+                ge_rescanPrivacyFull();
+                panelAddLog(`Privacy Category "${cat.label}" ${on ? 'ON' : 'OFF'}`);
+            }).row;
+        });
+        const privacyCategoriesDropdown = createSection('Privacy Categories', privacyCategoryRows);
+
+        const autoLockRow = document.createElement('div');
+        autoLockRow.className = 'ge-row';
+        const autoLockToggle = createToggle('Auto-Lock on Idle', featureAutoLock, (on) => {
+            featureAutoLock = on;
+            setState('GrokEnhancer_AutoLock', on);
+            ge_resetIdleTimer();
+            panelAddLog(`Auto-Lock on Idle ${on ? 'ON' : 'OFF'}`);
+        });
+        const autoLockMinutesInput = document.createElement('input');
+        autoLockMinutesInput.type = 'number';
+        autoLockMinutesInput.min = '1';
+        autoLockMinutesInput.value = String(ge_autoLockMinutes);
+        autoLockMinutesInput.style.cssText = 'width:44px;background:#333;color:#aaa;border:none;border-radius:4px;padding:2px 6px;font-size:11px;margin-right:8px;';
+        autoLockMinutesInput.addEventListener('change', () => {
+            const mins = Math.max(1, parseInt(autoLockMinutesInput.value, 10) || 5);
+            ge_autoLockMinutes = mins;
+            autoLockMinutesInput.value = String(mins);
+            setState('GrokEnhancer_AutoLockMinutes', mins);
+            ge_resetIdleTimer();
+        });
+        autoLockToggle.row.insertBefore(autoLockMinutesInput, autoLockToggle.row.lastChild);
+
+        const pinLockRow = document.createElement('div');
+        pinLockRow.className = 'ge-row';
+        const pinLockLabel = document.createElement('span');
+        pinLockLabel.className = 'ge-label';
+        pinLockLabel.textContent = 'PIN Lock';
+        const pinLockBtnGroup = document.createElement('span');
+        pinLockBtnGroup.style.cssText = 'display:flex;gap:6px;';
+        const pinSetBtn = document.createElement('button');
+        pinSetBtn.textContent = 'Set PIN';
+        pinSetBtn.style.cssText = 'background:#333;color:#aaa;border:none;border-radius:4px;padding:2px 10px;font-size:11px;cursor:pointer;';
+        pinSetBtn.addEventListener('click', () => {
+            const openSetup = () => ge_setupPin(() => panelAddLog('PIN Lock ON'));
+            if (_ge_hasPinSet()) ge_promptPinVerify(openSetup, 'Enter current PIN to change it', 'Next');
+            else openSetup();
+        });
+        const pinResetBtn = document.createElement('button');
+        pinResetBtn.textContent = 'Reset';
+        pinResetBtn.style.cssText = 'background:#333;color:#aaa;border:none;border-radius:4px;padding:2px 10px;font-size:11px;cursor:pointer;';
+        pinResetBtn.addEventListener('click', () => {
+            const doReset = () => {
+                setState('GrokEnhancer_SettingsPinHash', null);
+                featurePinLock = false;
+                setState('GrokEnhancer_PinLock', false);
+                panelAddLog('PIN Lock reset');
+            };
+            if (_ge_hasPinSet()) ge_promptPinVerify(doReset, 'Enter PIN to reset', 'Reset');
+            else doReset();
+        });
+        pinLockBtnGroup.appendChild(pinSetBtn);
+        pinLockBtnGroup.appendChild(pinResetBtn);
+        pinLockRow.appendChild(pinLockLabel);
+        pinLockRow.appendChild(pinLockBtnGroup);
+
+        section.appendChild(createSection('Privacy', [
+            ge_buildSimpleToggleRow('Auto Private Chat'),
+            privacyToggle.row,
+            privacyBlurToggle.row,
+            hideUsernameToggle.row,
+            hideEmailToggle.row,
+            hideAvatarToggle.row,
+            privacyWordsBtn,
+            privacyHotkeyRow,
+            privacyCategoriesDropdown,
+            autoLockToggle.row,
+            pinLockRow,
+        ]));
+        ge_updatePrivacyBadge();
+
+        // ── Other ──
         const stylesBtn = document.createElement('div');
         stylesBtn.className = 'ge-row';
         const stylesLabel = document.createElement('span');
@@ -2727,7 +3170,19 @@
         stylesOpenBtn.addEventListener('click', () => ge_openStylesEditor());
         stylesBtn.appendChild(stylesLabel);
         stylesBtn.appendChild(stylesOpenBtn);
-        section.appendChild(stylesBtn);
+
+        section.appendChild(createSection('Other', [
+            ge_buildSimpleToggleRow('Clickable Links'),
+            createToggle('Hidden Menu Survives Refresh', featureFabStayHidden, (on) => {
+                featureFabStayHidden = on; setState('GrokEnhancer_FabStayHidden', on);
+                if (on && _ge_fabHidden) setState('GrokEnhancer_FabHidden', true);
+                if (!on) setState('GrokEnhancer_FabHidden', false);
+                panelAddLog(`Hidden Menu Survives Refresh ${on ? 'ON' : 'OFF'}`);
+            }).row,
+            ge_buildSimpleToggleRow('Disable Auto Scroll'),
+            ge_buildSimpleToggleRow('Debug'),
+            stylesBtn,
+        ]));
 
         panel.appendChild(section);
 
@@ -2772,25 +3227,32 @@
     function startContentObserver() {
         const obs = new MutationObserver((mutations) => {
             if (!logoReplaced && featureLogo) tryReplaceLogo();
-            if (featureDeleter) ge_scheduleDeleterInjection();
 
             let menuDetected = false;
+            const privacyNodes = featurePrivacyMode ? [] : null;
             for (const m of mutations) {
                 for (const added of m.addedNodes) {
                     if (added.nodeType !== Node.ELEMENT_NODE) continue;
                     if (featureLinks) _scheduleProcess(added);
                     if (!menuDetected && (added.matches?.('[role="menu"]') || added.querySelector?.('[role="menu"]'))) menuDetected = true;
+                    if (privacyNodes) privacyNodes.push(added);
                 }
             }
 
-            if (menuDetected && featureHideHeavy) { ge_markHeavyItems(); ge_markUpgradeHeavyBtns(); }
+            if (menuDetected && (featureHideHeavy || featureHideExpert || featureHideAuto)) { ge_markModelItems(); ge_markUpgradeHeavyBtns(); }
             if (featureHidePremium) ge_dismissPremium();
 
             // Mark "Upgrade to Heavy" buttons on any mutation
             if (featureHideHeavy) ge_markUpgradeHeavyBtns();
 
-            // Streamer mode: scan new sidebar items
-            if (featureStreamer) ge_scanSidebarForSensitive();
+            // Hide follow-up prompt containers when they appear
+            if (featureHideFollowups) ge_markFollowupContainers();
+
+            // Hide sidebar nav items (Build / Imagine / Skills and Connectors)
+            if (featureHideBuildNav || featureHideImagineNav || featureHideSkillsNav) ge_scanSidebarNavHide();
+
+            // Privacy mode: scan only newly-added nodes, not the whole document
+            if (featurePrivacyMode && privacyNodes.length) ge_scanPrivacySensitive(privacyNodes);
 
             // Debounce popup dismissal (less urgent, 500ms)
             if ((featureHidePopups || featureHidePremium) && !_ge_popupTimer) {
@@ -2884,6 +3346,14 @@
             return { url: anyImg.src, type: 'image', ext };
         }
         return null;
+    }
+
+    // Derive a real filename for a download. Base64 data: URIs legitimately contain
+    // '/' characters, so naively doing url.split('/').pop() on one grabs a random
+    // fragment of the base64 payload (e.g. "Z", "2Q==") instead of a filename.
+    function ge_filenameFromMedia(url, ext) {
+        if (url.startsWith('data:')) return `grok_${Date.now()}.${ext}`;
+        return url.split('/').pop().split('?')[0] || `grok_${Date.now()}.${ext}`;
     }
 
     // Reliable download — uses GM_xmlhttpRequest for CORS-free downloading,
@@ -2991,7 +3461,7 @@
                 // Fallback: download single visible media from DOM
                 const directMedia = ge_getMediaSrc(card);
                 if (directMedia) {
-                    const fname = directMedia.url.split('/').pop().split('?')[0] || `grok_${Date.now()}.${directMedia.ext}`;
+                    const fname = ge_filenameFromMedia(directMedia.url, directMedia.ext);
                     await ge_downloadBlob(directMedia.url, fname);
                 }
             }
@@ -3109,7 +3579,7 @@
             if (media.length === 0) { logDebug('[Downloader] No media found on detail page'); return; }
             btn.style.opacity = '0.5'; btn.style.pointerEvents = 'none';
             for (const m of media) {
-                const fname = m.name || m.url.split('/').pop().split('?')[0] || `grok_${Date.now()}.${m.ext}`;
+                const fname = m.name || ge_filenameFromMedia(m.url, m.ext);
                 await ge_downloadBlob(m.url, fname);
             }
             btn.style.opacity = ''; btn.style.pointerEvents = '';
@@ -3510,7 +3980,17 @@
         const now = Date.now();
         if (now - _ge_imLastModScan < 400) return;
         _ge_imLastModScan = now;
-        if (!ge_findModerationSignal()) return;
+        if (!ge_findModerationSignal()) {
+            // Moderation cleared (e.g. a retry succeeded) — reset so auto-retry doesn't
+            // permanently stop working for the rest of the session once it hits the cap.
+            // The 5s cooldown avoids resetting mid-flight, before the just-clicked retry's
+            // own moderation signal has had time to render.
+            if (ge_imRetryCount > 0 && now - ge_imLastRetryTime > 5000) {
+                ge_imRetryCount = 0;
+                ge_updateImStatus();
+            }
+            return;
+        }
 
         const btn = document.querySelector('button[aria-label="Make video"]')
             || document.querySelector('button[aria-label="Send"]')
@@ -3588,6 +4068,7 @@
         'erotic': 'er0tic', 'erotica': 'er0tica',
         'hentai': 'h3ntai', 'explicit': 'expl1cit',
         'nsfw': 'n5fw', 'uncensored': 'uncen5ored',
+        'lewd': 'l3wd', 
         // ── Body parts ──
         'breast': 'br3ast', 'breasts': 'br3asts', 'boobs': 'b00bs', 'boob': 'b00b',
         'nipple': 'n1pple', 'nipples': 'n1pples',
@@ -3620,21 +4101,10 @@
         'bikini': 'bk1ni', 'lingerie': 'l1ngerie',
         'skirt': 'sk1rt', 'shorts': 'sh0rts',
         'dress': 'dr3ss', 'outfit': '0utfit',
-        // ── Violence / gore ──
-        'kill': 'k1ll', 'killing': 'k1lling', 'killed': 'k1lled',
-        'murder': 'murd3r', 'murdered': 'murd3red',
-        'die': 'd1e', 'dead': 'd3ad', 'death': 'd34th',
-        'blood': 'bl00d', 'bloody': 'bl00dy', 'bleeding': 'bl33ding',
-        'gore': 'g0re', 'gory': 'g0ry', 'mutilate': 'mut1late',
-        'decapitate': 'dec4pitate', 'dismember': 'd1smember',
-        'stab': 'st4b', 'stabbing': 'st4bbing',
-        'choke': 'ch0ke', 'strangle': 'str4ngle',
-        'shoot': 'sh00t', 'shooting': 'sh00ting',
-        'wound': 'w0und', 'injury': '1njury', 'gash': 'g4sh',
-        'corpse': 'c0rpse', 'skull': 'sk0ll',
+        // ── Violence ──
+        'choke': 'ch0ke',
         // ── Weapons ──
         'gun': 'gu n', 'guns': 'gun5', 'rifle': 'r1fle',
-        'bomb': 'b0mb', 'explosion': 'expl0sion', 'explode': 'expl0de',
         'weapon': 'we4pon', 'weapons': 'we4pons',
         'knife': 'kn1fe', 'blade': 'bl4de',
         // ── Substances ──
@@ -3642,14 +4112,7 @@
         'cocaine': 'c0caine', 'heroin': 'her01n', 'meth': 'm3th',
         'marijuana': 'marij0ana', 'weed': 'w33d',
         // ── Other flagged ──
-        'violence': 'vi0lence', 'violent': 'vi0lent',
         'fight': 'f1ght', 'fighting': 'f1ghting',
-        'assault': '4ssault', 'abuse': '4buse',
-        'hate': 'h4te', 'racist': 'rac1st',
-        'suicide': 'su1cide', 'harm': 'h4rm',
-        'torture': 't0rture', 'torment': 't0rment',
-        'destroy': 'destr0y', 'destruction': 'destr0ction',
-        'slavery': 'sl4very', 'slave': 'sl4ve',
         'body': 'b0dy', 'figure': 'f1gure',
         // ── Common softeners ──
         'hot': 'h0t', 'girl': 'g1rl', 'boy': 'b0y',
@@ -4157,6 +4620,11 @@
             #ge-im-panel .im-row { display:flex;align-items:center;justify-content:space-between; }
             #ge-im-panel .im-lbl { font-size:12px;color:#aaa;user-select:none; }
             #ge-im-panel .im-divider { height:1px;background:#222;margin:0; }
+
+            @media (max-width: 768px) {
+                #ge-im-fab { bottom: 80px; }
+                #ge-im-panel { bottom: 120px; }
+            }
         `;
         document.head.appendChild(css);
 
@@ -4361,15 +4829,19 @@
         applyShareHide(featureHideShare);
         ge_applyPopupHideCSS(featureHidePopups);
         ge_applyPremiumHideCSS(featureHidePremium);
-        ge_applyHideHeavyCSS(featureHideHeavy);
-        ge_applyStreamerCSS(featureStreamer);
+        ge_applyHideModelsCSS(featureHideHeavy || featureHideExpert || featureHideAuto || featureHideFollowups);
+        ge_applyPrivacyCSS(featurePrivacyMode);
+        ge_applyFooterPrivacyCSS();
         startContentObserver();
+        ge_startPrivacyGuardObserver();
+        ge_startIdleWatch();
         rl_observeDOM();
-        ge_checkPendingDelete();
-        if (featureDeleter) ge_scheduleDeleterInjection();
         if (featureAutoPrivate) ge_autoEnablePrivateMode();
-        if (featureStreamer) ge_scanSidebarForSensitive();
+        if (featurePrivacyMode) ge_scanPrivacySensitive();
+        if (featureHideHeavy || featureHideExpert || featureHideAuto) ge_markModelItems();
         if (featureHideHeavy) ge_markUpgradeHeavyBtns();
+        if (featureHideFollowups) ge_markFollowupContainers();
+        if (featureHideBuildNav || featureHideImagineNav || featureHideSkillsNav) ge_scanSidebarNavHide();
         if (featureHidePremium) {
             ge_dismissPremium();
             setTimeout(ge_dismissPremium, 1500); // catch late-rendered Upgrade button
@@ -4378,7 +4850,7 @@
         if (featureImagineMenu) ge_setupImagineMenu();
         if (ge_imPersistentPrompt) ge_startPersistentPromptWatch();
         if (featureDisableAutoScroll) ge_enforceAutoScrollDisable();
-        console.log('[GrokEnhancer] Loaded — Logo:', featureLogo, '| Links:', featureLinks, '| DeMod:', featureDeMod, '| RateLimit:', featureRateLimit, '| Debug:', featureDebug, '| HideShare:', featureHideShare, '| Deleter:', featureDeleter, '| HidePopups:', featureHidePopups, '| HidePremium:', featureHidePremium, '| HideHeavy:', featureHideHeavy, '| AutoPrivate:', featureAutoPrivate, '| Streamer:', featureStreamer, '| ImagineMenu:', featureImagineMenu);
+        console.log('[GrokEnhancer] Loaded — Logo:', featureLogo, '| Links:', featureLinks, '| DeMod:', featureDeMod, '| RateLimit:', featureRateLimit, '| Debug:', featureDebug, '| HideShare:', featureHideShare, '| HidePopups:', featureHidePopups, '| HidePremium:', featureHidePremium, '| HideHeavy:', featureHideHeavy, '| HideExpert:', featureHideExpert, '| HideAuto:', featureHideAuto, '| HideFollowups:', featureHideFollowups, '| AutoPrivate:', featureAutoPrivate, '| PrivacyMode:', featurePrivacyMode, '| ImagineMenu:', featureImagineMenu);
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
