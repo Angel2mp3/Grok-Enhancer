@@ -6,6 +6,7 @@
 // @author       Angel
 // @homepageURL  https://angelmakes.software/
 // @source       https://github.com/Angel2mp3
+// @license      MIT
 // @match        https://grok.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=grok.com
 // @updateURL    https://github.com/Angel2mp3/Grok-Enhancer/raw/main/Grok-Enhancer.user.js
