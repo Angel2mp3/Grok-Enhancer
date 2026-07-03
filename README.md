@@ -3,7 +3,7 @@
 **<p align="center"> The all-in-one Grok userscript that you could ever need! </p>**
 
 <p align="center">
-  <a href="https://github.com/Angel2mp3"><img src="https://img.shields.io/badge/Version-1.0-0D47A1?style=for-the-badge&logo=github&logoColor=white" alt="Version"/></a>
+  <a href="https://github.com/Angel2mp3"><img src="https://img.shields.io/badge/Version-2.0-0D47A1?style=for-the-badge&logo=github&logoColor=white" alt="Version"/></a>
   <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fuserscript-install-tracker.vercel.app%2Fapi%2Fbadge%3Frepo%3DGrokEnhancer&style=for-the-badge&color=4A148C" alt="Installs"/>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-424242?style=for-the-badge" alt="MIT License"/></a>
 </p>
@@ -27,13 +27,21 @@
 
 ---
 
+## 📑 Contents
+
+- [Features](#-features)
+- [Settings](#️-settings)
+- [Technical Details](#-technical-details)
+- [Privacy](#-privacy)
+- [Credits](#-credits)
+
+---
+
 ## ✨ Features
 
 ### ★ SuperGrok Logo
 
 Replaces the default Grok greeting logo with the SuperGrok logo.
-
-
 
 ### 🛠️ DeMod (Moderation Bypass)
 
@@ -56,23 +64,15 @@ Injects a live counter into the Grok query bar showing your remaining queries an
 
 ---
 
-### 🗑️ Bulk Deleter
-
-Adds **Delete All** buttons to multiple Grok pages for quick bulk cleanup:
-
-| Page                     | What it deletes                               |
-| ------------------------ | --------------------------------------------- |
-| `/files`                 | All uploaded files and assets                 |
-| `/share-links`           | All shared conversation links                 |
-| `/deleted-conversations` | Permanently deletes all trashed conversations |
-
-Each button matches Grok's native styling and shows a confirmation dialog before proceeding. Also adds a **Restore All** button on the deleted-conversations page.
-
----
-
 ### 🚫 Hide Popups
 
 Automatically dismisses Grok's satisfaction survey popups, "Think Harder/Quick Response", suggestion popups, and more so they don't interrupt your workflow.
+
+---
+
+### 💬 Hide Follow-up Prompts
+
+Hides Grok's suggested follow-up prompt chips so they don't clutter the end of a response.
 
 ---
 
@@ -82,9 +82,15 @@ Hides all SuperGrok upgrade prompts and upsell banners across the entire interfa
 
 ---
 
-### 🏋️ Hide Heavy Model
+### 🏋️ Hide Models (Heavy / Expert / Auto)
 
-Hides the "Heavy" model option from the model selector dropdown. CSS-only, zero overhead — only activates when a model menu is open.
+Hides specific model options from the model selector dropdown. Individually toggle **Heavy**, **Expert**, and **Auto** from a collapsible sub-panel (its trigger shows a live summary, e.g. `Heavy, Auto`, or `None`). CSS-only, zero overhead — only activates when a model menu is open. Hiding Heavy also hides any "Upgrade to Heavy" buttons.
+
+---
+
+### 🧭 Hide Sidebar Nav Items
+
+Individually hide the **Build**, **Imagine**, and **Skills and Connectors** entries from the main sidebar menu. Matched by label text rather than link URL, so they keep working even if Grok changes the underlying routes.
 
 ---
 
@@ -100,15 +106,15 @@ Stops Grok from automatically scrolling to the bottom as responses stream in, le
 
 ---
 
-### 🔞 Streamer Mode
+### 🔞 Privacy Mode
 
-Automatically hides conversations with sensitive names from both the sidebar and the "See all" menu as well. Matching chats are completely hidden (not blurred) — they are **not deleted**, just visually removed while Streamer Mode is enabled. Turning it off restores them instantly.
+Automatically hides or blurs conversations with sensitive names from both the sidebar and the "See all" menu. Matching chats are **not deleted** — they are either hidden or blurred while Privacy Mode is enabled. Turning it off restores them instantly.
 
 **Categories detected:**
 
 - **NSFW / Sexual** — explicit terms, porn site names, kink/fetish terms, etc.
 - **Personal / Medical** — STDs, pregnancy, addiction, mental health, suicide, self-harm
-- **Abuse / Assault** — domestic abuse, sexual assault, harassment, stalking, etc.
+- **Abuse / Assault** — domestic abuse, SA, harassment, stalking, etc.
 - **Drugs** — recreational drugs, vaping, smoking
 - **Legal** — lawsuits, attorneys, court, felonies, arrest, legality
 - **Guns / Ammo / Self-Defense** — firearms, calibers, ammo types, concealed/open carry, specific brands
@@ -119,6 +125,16 @@ Automatically hides conversations with sensitive names from both the sidebar and
 
 Uses a single pre-compiled regex for performance — no lag even with hundreds of sidebar items.
 
+**Blur Chats (instead of hide)** — optionally blur sensitive chats instead of hiding them. Default is hide.
+
+**Privacy Custom Words** — add your own words/phrases in the settings panel to hide/blur chats matching terms not already covered by the built-in categories.
+
+**Panic Hotkey** — set a keyboard shortcut (default `Ctrl+Shift+H`) that instantly toggles Privacy Mode on or off from anywhere, including while typing in the chat composer. Hidden automatically on mobile, since there's no keyboard to trigger it.
+
+**PIN Lock** — set a 4-digit PIN (in the settings panel) to require it before Privacy Mode can be turned **off**, whether that's via the panel checkbox or the Panic Hotkey. The settings panel itself always opens freely — the PIN only stops someone else from switching Privacy Mode off once it's on. Changing or resetting an existing PIN also requires entering it first. With no PIN set, everything behaves as if PIN Lock didn't exist.
+
+**Hide Username / Hide Email / Hide Avatar** — hide your account name, email, and/or profile picture in the sidebar footer. All three default **off** and apply automatically whenever Privacy Mode is enabled, but each can be switched on individually if you want that piece of your identity hidden while Privacy Mode is on.
+
 ---
 
 ### 💡 Imagine Menu
@@ -128,7 +144,7 @@ A dedicated floating panel for Grok's `/imagine` video and image generation — 
 | Option                       | Description                                                                                                                                                           |
 | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Enabled / Disabled**       | Master toggle for all Imagine Menu interception                                                                                                                       |
-| **Extend Video Length Bypass**      | Bypass the extend-video-length limit (1–30 seconds) — injected into each chat POST request before it's sent                                                           |
+| **Extend Video Length Bypass (PATCHED)**      | Bypass the extend-video-length limit (1–30 seconds) — injected into each chat POST request before it's sent                                                           |
 | **Auto-Retry on Moderation** | Automatically re-submits the prompt when Grok flags or blocks a generation                                                                                            |
 | **Smart Retry**              | On each retry, rewrites the prompt using a different obfuscation strategy (leet speak, zero-width character insertion, synonym swaps) to slip past moderation filters |
 | **Persistent Prompt**        | Saves your last prompt before every retry — if Grok clears the input box after a block, the prompt is automatically restored                                          |
@@ -205,27 +221,38 @@ Automatically converts URLs, domain names (including subdomains like `clips.twit
 
 ## ⚙️ Settings
 
-Click the **✦ button** in the bottom-right of any Grok page to open the settings panel. Every feature can be toggled individually and is saved automatically.
+Click the **✦ button** in the bottom-right of any Grok page to open the settings panel. Every feature can be toggled individually and is saved automatically. The most-used toggles sit at the top; the rest are grouped into collapsible sections (click a section name to expand it) to keep the panel from getting unwieldy.
 
 **Default state of each toggle**
 
-| Toggle                | Default | Description                                      |
-| --------------------- | ------- | ------------------------------------------------ |
-| SuperGrok Logo        | ✅ On    | Replace greeting logo                            |
-| Clickable Links       | ✅ On    | Linkify URLs and @mentions                       |
-| DeMod                 | ✅ On    | Strip moderation flags                           |
-| Rate Limit            | ✅ On    | Show query counter in input bar                  |
-| Deleter               | ✅ On    | Inject Delete All buttons on bulk pages          |
-| Hide Share Button     | ❌ Off   | Hide the Share button on conversations           |
-| Hide Popups           | ❌ Off   | Auto-dismiss satisfaction & Think Harder popups  |
-| Hide Premium Upsells  | ❌ Off   | Hide all SuperGrok upgrade prompts               |
-| Hide Heavy Model      | ❌ Off   | Hide the Heavy model option from the selector    |
-| Auto Private Chat     | ❌ Off   | Auto-enable private mode on load                 |
-| Disable Auto Scroll   | ❌ Off   | Stop Grok from auto-scrolling during responses   |
-| Streamer Mode         | ❌ Off   | Hide sensitive chat names from sidebar & dialogs |
-| Imagine Menu          | ❌ Off   | Enable the Imagine Menu floating panel           |
-| Debug                 | ❌ Off   | Log DeMod / custom style activity to console     |
-| Custom Styles         | —       | Manage button opens style editor dialog          |
+| Section                | Toggle                        | Default | Description                                        |
+| ----------------------- | ----------------------------- | ------- | --------------------------------------------------- |
+| *(top-level)*            | SuperGrok Logo                | ✅ On    | Replace greeting logo                                |
+| *(top-level)*            | DeMod                         | ✅ On    | Strip moderation flags                               |
+| *(top-level)*            | Rate Limit                    | ✅ On    | Show query counter in input bar                      |
+| UI Cleanup               | Hide Share Button             | ❌ Off   | Hide the Share button on conversations               |
+| UI Cleanup               | Hide Popups                   | ❌ Off   | Auto-dismiss satisfaction & Think Harder popups      |
+| UI Cleanup               | Hide Premium Upsells          | ❌ Off   | Hide all SuperGrok upgrade prompts                   |
+| UI Cleanup               | Hide Follow-up Prompts        | ❌ Off   | Hide Grok's suggested follow-up prompt chips         |
+| UI Cleanup               | Hide Models (Heavy/Expert/Auto) | ❌ Off | Sub-panel — individually hide models from the selector |
+| UI Cleanup               | Hide Build                    | ❌ Off   | Hide the Build entry from the sidebar                |
+| UI Cleanup               | Hide Imagine                  | ❌ Off   | Hide the Imagine entry from the sidebar              |
+| UI Cleanup               | Hide Skills and Connectors    | ❌ Off   | Hide the Skills and Connectors entry from the sidebar |
+| Privacy                  | Auto Private Chat             | ❌ Off   | Auto-enable private mode on load                     |
+| Privacy                  | Privacy Mode                  | ❌ Off   | Hide/blur sensitive chat names from sidebar & dialogs |
+| Privacy                  | Blur Chats (instead of hide)  | ❌ Off   | Blur sensitive chats instead of hiding them          |
+| Privacy                  | Hide Username                 | ❌ Off   | Hide sidebar footer name while Privacy Mode is on    |
+| Privacy                  | Hide Email                    | ❌ Off   | Hide sidebar footer email while Privacy Mode is on   |
+| Privacy                  | Hide Avatar                   | ❌ Off   | Hide sidebar footer profile picture while Privacy Mode is on |
+| Privacy                  | Privacy Custom Words          | —       | Manage button opens custom word list editor          |
+| Privacy                  | Panic Hotkey                  | —       | Set the key combo that instantly toggles Privacy Mode (hidden on mobile) |
+| Privacy                  | PIN Lock                      | ❌ Off   | Set PIN / Reset buttons — requires the PIN to turn Privacy Mode off or to change/reset it |
+| Other                 | Clickable Links               | ✅ On    | Linkify URLs and @mentions                           |
+| Other                 | Hidden Menu Survives Refresh  | ❌ Off   | Keep the settings FAB hidden across page reloads     |
+| Other                 | Disable Auto Scroll           | ❌ Off   | Stop Grok from auto-scrolling during responses       |
+| Other                 | Imagine Menu                  | ❌ Off   | Enable the Imagine Menu floating panel               |
+| Other                 | Debug                         | ❌ Off   | Log DeMod / custom style activity to console         |
+| Other                 | Custom Styles                 | —       | Manage button opens style editor dialog              |
 
 ---
 
@@ -254,13 +281,13 @@ This script runs entirely in your browser — no data is sent anywhere by the sc
 
 ## 🙏 Credits
 
-This script builds upon and was inspired by the work of these excellent scripts:
+This project incorporates elements from these fantastic scripts:
 
 | Script                  | Author                 | Link                                   |
 | ----------------------- | ---------------------- | -------------------------------------- |
-| Grok DeMod              | **UniverseDev**        | [Greasy Fork](https://greasyfork.org/) |
-| Grok Rate Limit Display | **Blankspeaker**       | [Greasy Fork](https://greasyfork.org/) |
-| Grok Ultimate Manager   | **Aggressive_Tip4777** | [Greasy Fork](https://greasyfork.org/) |
+| Grok DeMod | **UniverseDev** | [Greasy Fork](https://greasyfork.org/en/scripts/531147-grok-demod) |
+| Grok Rate Limit Display | **KHROTU, Blankspeaker, CursedAtom** | [Greasy Fork](https://greasyfork.org/en/scripts/558017-grok-rate-limit-display) |
+
 
 ---
 
