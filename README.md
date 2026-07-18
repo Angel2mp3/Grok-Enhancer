@@ -38,7 +38,7 @@ Hides all SuperGrok upgrade prompts and upsell banners across the entire interfa
 
 ---
 
-### 🕑 Rate Limit Display
+### 🕑 Message Rate Limit Display
 
 Injects a live counter into the Grok query bar showing your remaining queries and reset time for the current model. Updates automatically and includes a countdown timer when you're rate limited.
 
