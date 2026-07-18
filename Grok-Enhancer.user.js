@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Enhancer
 // @namespace    https://grok.com/
-// @version      2.0
+// @version      2.2.0
 // @description  All-in-one Grok enhancement
 // @author       Angel
 // @homepageURL  https://angelmakes.software/
@@ -28,9 +28,6 @@
     // ══════════════════════════════════════════════════════════════
     const _win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
     const _originalFetch = _win.fetch.bind(_win);
-    const _OriginalWebSocket = _win.WebSocket;
-    const _encoder = new TextEncoder();
-    const _decoder = new TextDecoder();
 
     // ── Media Database (populated from API interception for downloader) ──
     const _ge_mediaDatabase = new Map();
@@ -121,8 +118,8 @@
     // ── Feature toggles ──────────────────────────────────────────
     let featureLogo        = getState('GrokEnhancer_Logo', true);
     let featureLinks       = getState('GrokEnhancer_Links', false);
-    let featureDeMod       = getState('GrokDeModEnabled', true);
     let featureRateLimit   = getState('GrokEnhancer_RateLimit', true);
+    let featureWeeklyUsage = getState('GrokEnhancer_WeeklyUsageBar', false);
     let featureDebug       = getState('GrokDeModDebug', false);
     let featureHideShare   = getState('GrokEnhancer_HideShare', false);
     let featureHidePopups  = getState('GrokEnhancer_HidePopups', false);
@@ -131,9 +128,14 @@
     let featureHideExpert  = getState('GrokEnhancer_HideExpert', false);
     let featureHideAuto    = getState('GrokEnhancer_HideAuto', false);
     let featureHideFollowups = getState('GrokEnhancer_HideFollowups', false);
+    let featureHideComposerSuggestions = getState('GrokEnhancer_HideComposerSuggestions', false);
     let featureHideBuildNav  = getState('GrokEnhancer_HideBuildNav', false);
     let featureHideImagineNav = getState('GrokEnhancer_HideImagineNav', false);
     let featureHideSkillsNav = getState('GrokEnhancer_HideSkillsNav', false);
+    let featureHideAutomationsNav = getState('GrokEnhancer_HideAutomationsNav', false);
+    let featureHidePrivateNotice = getState('GrokEnhancer_HidePrivateNotice', false);
+    let featureHideDictation = getState('GrokEnhancer_HideDictation', false);
+    let featureHideVoiceMode = getState('GrokEnhancer_HideVoiceMode', false);
     let featureAutoPrivate = getState('GrokEnhancer_AutoPrivate', false);
     let featurePrivacyMode    = getState('GrokEnhancer_Streamer', false);
     let featurePrivacyBlur    = getState('GrokEnhancer_PrivacyBlur', false);
@@ -147,7 +149,7 @@
 
     // ── Imagine Menu state ──
     let featureImagineMenu  = getState('GrokEnhancer_ImagineMenu', false);
-    let ge_imInterceptOn    = getState('GrokEnhancer_IM_Intercept', true);
+    let ge_imInterceptOn    = getState('GrokEnhancer_IM_Intercept', false);
     let ge_imVideoLength    = parseInt(getState('GrokEnhancer_IM_VideoLength', '30')) || 30;
     let ge_imAutoRetry      = getState('GrokEnhancer_IM_AutoRetry', false);
     let ge_imMaxRetries     = parseInt(getState('GrokEnhancer_IM_MaxRetries', '3')) || 3;
@@ -159,17 +161,222 @@
     let ge_imInterceptCount = 0;
     let ge_imRetryCount     = 0;
     let ge_imLastRetryTime  = 0;
+    let ge_imLastVideoMiss  = false;
+    let ge_imLastLengthPath = null;
+    let ge_imLastLengthForced = false;
+    let ge_imLastModReason  = '';
     let ge_imActivePromptId = getState('GrokEnhancer_ActivePromptId', null);
 
-    // ── Prompt Manager helpers ──
-    function ge_getPrompts() {
-        try { return JSON.parse(localStorage.getItem('GrokEnhancer_Prompts') || '[]'); }
-        catch (_) { return []; }
+    // ── Downloader preferences ──
+    let ge_dlFilenameTemplate = getState('GrokEnhancer_DL_FilenameTemplate', '{date}_{id}_{type}') || '{date}_{id}_{type}';
+
+    // ── Prompt Library (v2: folders, tags, versioned storage; migrates flat v1 arrays) ──
+    const GE_PROMPTS_KEY = 'GrokEnhancer_Prompts';
+    const GE_PROMPT_FOLDERS_KEY = 'GrokEnhancer_PromptFolders';
+
+    function ge_normalizePrompt(p) {
+        if (!p || typeof p !== 'object') return null;
+        const now = Date.now();
+        const title = (p.title || p.name || 'Untitled').toString();
+        const body = (p.body != null ? p.body : (p.text || '')).toString();
+        const tags = Array.isArray(p.tags)
+            ? p.tags.map(t => String(t).trim()).filter(Boolean)
+            : (typeof p.tags === 'string' ? p.tags.split(/[,;]/).map(t => t.trim()).filter(Boolean) : []);
+        return {
+            id: p.id || ('prompt_' + now + '_' + Math.random().toString(36).slice(2, 7)),
+            title,
+            name: title, // alias for Imagine inject / older UI
+            body,
+            text: body,  // alias for Imagine inject / older UI
+            description: (p.description || '').toString(),
+            tags,
+            folderId: p.folderId != null ? p.folderId : null,
+            sourceType: p.sourceType || 'both',
+            createdAt: p.createdAt || now,
+            updatedAt: p.updatedAt || now
+        };
     }
-    function ge_savePrompts(p) { localStorage.setItem('GrokEnhancer_Prompts', JSON.stringify(p)); }
+
+    function ge_getPrompts() {
+        try {
+            const raw = JSON.parse(localStorage.getItem(GE_PROMPTS_KEY) || '[]');
+            const arr = Array.isArray(raw) ? raw : (raw && Array.isArray(raw.prompts) ? raw.prompts : []);
+            return arr.map(ge_normalizePrompt).filter(Boolean);
+        } catch (_) { return []; }
+    }
+
+    function ge_savePrompts(list) {
+        const prompts = (list || []).map(ge_normalizePrompt).filter(Boolean);
+        localStorage.setItem(GE_PROMPTS_KEY, JSON.stringify({ version: 2, prompts }));
+    }
+
+    function ge_getPromptFolders() {
+        try {
+            const raw = JSON.parse(localStorage.getItem(GE_PROMPT_FOLDERS_KEY) || '[]');
+            return Array.isArray(raw) ? raw : [];
+        } catch (_) { return []; }
+    }
+
+    function ge_savePromptFolders(folders) {
+        localStorage.setItem(GE_PROMPT_FOLDERS_KEY, JSON.stringify(Array.isArray(folders) ? folders : []));
+    }
+
+    function ge_exportPromptLibrary() {
+        return {
+            version: 2,
+            exportedAt: new Date().toISOString(),
+            folders: ge_getPromptFolders(),
+            prompts: ge_getPrompts()
+        };
+    }
+
+    function ge_importPromptLibrary(data, mode) {
+        // mode: 'replace' | 'merge'
+        if (!data || typeof data !== 'object') throw new Error('Invalid prompt library JSON');
+        const incoming = Array.isArray(data.prompts) ? data.prompts : (Array.isArray(data) ? data : null);
+        if (!incoming) throw new Error('No prompts array in import');
+        const foldersIn = Array.isArray(data.folders) ? data.folders : [];
+        const norm = incoming.map(ge_normalizePrompt).filter(Boolean);
+        if (mode === 'merge') {
+            const byId = new Map(ge_getPrompts().map(p => [p.id, p]));
+            for (const p of norm) byId.set(p.id, p);
+            ge_savePrompts([...byId.values()]);
+            const fById = new Map(ge_getPromptFolders().map(f => [f.id, f]));
+            for (const f of foldersIn) {
+                if (f && f.id) fById.set(f.id, { id: f.id, name: f.name || 'Folder' });
+            }
+            ge_savePromptFolders([...fById.values()]);
+        } else {
+            ge_savePrompts(norm);
+            ge_savePromptFolders(foldersIn.filter(f => f && f.id).map(f => ({ id: f.id, name: f.name || 'Folder' })));
+        }
+        return ge_getPrompts().length;
+    }
+
+    /** Insert prompt body into the visible composer textarea (chat or imagine). */
+    function ge_insertPromptIntoComposer(body, opts) {
+        const text = (body || '').toString();
+        if (!text) return false;
+        const preferAppend = !!(opts && opts.append);
+        const input = document.querySelector('textarea[aria-label="Make a video"]')
+            || document.querySelector('textarea[aria-label="Ask anything"]')
+            || document.querySelector('form textarea')
+            || document.querySelector('main textarea')
+            || document.querySelector('textarea');
+        if (!input) return false;
+        const next = preferAppend && input.value ? (input.value + '\n\n' + text) : text;
+        const setter = Object.getOwnPropertyDescriptor(_win.HTMLTextAreaElement.prototype, 'value')?.set;
+        if (setter) setter.call(input, next); else input.value = next;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.focus();
+        return true;
+    }
 
     function logDebug(...a) { if (featureDebug) console.log('[GrokEnhancer]', ...a); }
     function logError(...a) { console.error('[GrokEnhancer]', ...a); }
+
+    /** Read request body text once (string body or Request clone). */
+    async function ge_readRequestBody(input, requestArgs, isReqObj) {
+        try {
+            if (typeof requestArgs.body === 'string') return requestArgs.body;
+            if (isReqObj) return await input.clone().text();
+        } catch (_) {}
+        return null;
+    }
+
+    /** Apply body rewrite to fetch args (string body or Request). */
+    function ge_withNewBody(input, init, requestArgs, isReqObj, newBody) {
+        if (isReqObj) return { input: new Request(input, { body: newBody }), requestArgs: init || {} };
+        return { input, requestArgs: { ...requestArgs, body: newBody } };
+    }
+
+    /**
+     * Multi-path video length inject. applied=true when a pre-existing field written;
+     * forced=true when only legacy bag was created (may be ignored by Grok).
+     */
+    function ge_imApplyVideoLength(json, len) {
+        const out = { applied: false, forced: false, looksLikeVideo: false, path: null, oldVal: undefined };
+        if (!json || typeof json !== 'object') return out;
+        const snap = JSON.stringify(json).slice(0, 6000);
+        out.looksLikeVideo = !!(
+            json.toolOverrides?.videoGen !== undefined ||
+            !!json.responseMetadata?.modelConfigOverride?.modelMap?.videoGenModelConfig ||
+            json.videoLength != null || json.video_length != null || json.durationSeconds != null ||
+            /videoGen|video_gen|VIDEO_GEN|videoLength|durationSeconds/i.test(snap)
+        );
+        if (!out.looksLikeVideo) return out;
+
+        const trySet = (obj, key, path) => {
+            if (!obj || typeof obj !== 'object' || !(key in obj)) return false;
+            out.oldVal = obj[key];
+            obj[key] = len;
+            out.applied = true;
+            out.path = path;
+            return true;
+        };
+        const cfgPre = json.responseMetadata?.modelConfigOverride?.modelMap?.videoGenModelConfig;
+        if (cfgPre) {
+            trySet(cfgPre, 'videoLength', 'videoGenModelConfig.videoLength') ||
+            trySet(cfgPre, 'durationSeconds', 'videoGenModelConfig.durationSeconds') ||
+            trySet(cfgPre, 'lengthSeconds', 'videoGenModelConfig.lengthSeconds');
+        }
+        if (json.toolOverrides && typeof json.toolOverrides === 'object') {
+            trySet(json.toolOverrides, 'videoLength', 'toolOverrides.videoLength');
+            if (typeof json.toolOverrides.videoGen === 'object') {
+                trySet(json.toolOverrides.videoGen, 'videoLength', 'toolOverrides.videoGen.videoLength') ||
+                trySet(json.toolOverrides.videoGen, 'durationSeconds', 'toolOverrides.videoGen.durationSeconds');
+            }
+        }
+        trySet(json, 'videoLength', 'videoLength') ||
+        trySet(json, 'video_length', 'video_length') ||
+        trySet(json, 'durationSeconds', 'durationSeconds');
+
+        if (out.applied) {
+            ge_imLastVideoMiss = false;
+            ge_imLastLengthPath = out.path;
+            ge_imLastLengthForced = false;
+            return out;
+        }
+
+        // Extended path table for newer Grok payloads
+        const deepCandidates = [
+            [json.toolOverrides?.videoGen, 'length', 'toolOverrides.videoGen.length'],
+            [json.toolOverrides?.videoGen, 'duration', 'toolOverrides.videoGen.duration'],
+            [json.videoGen, 'videoLength', 'videoGen.videoLength'],
+            [json.videoGen, 'durationSeconds', 'videoGen.durationSeconds'],
+            [json.generationConfig, 'videoLength', 'generationConfig.videoLength'],
+            [json.generationConfig, 'durationSeconds', 'generationConfig.durationSeconds'],
+            [json.params, 'videoLength', 'params.videoLength'],
+            [json.params, 'durationSeconds', 'params.durationSeconds'],
+        ];
+        for (const [obj, key, path] of deepCandidates) {
+            if (trySet(obj, key, path)) {
+                ge_imLastVideoMiss = false;
+                ge_imLastLengthPath = out.path;
+                ge_imLastLengthForced = false;
+                return out;
+            }
+        }
+
+        if (!json.responseMetadata) json.responseMetadata = {};
+        if (!json.responseMetadata.modelConfigOverride) json.responseMetadata.modelConfigOverride = {};
+        if (!json.responseMetadata.modelConfigOverride.modelMap) json.responseMetadata.modelConfigOverride.modelMap = {};
+        if (!json.responseMetadata.modelConfigOverride.modelMap.videoGenModelConfig)
+            json.responseMetadata.modelConfigOverride.modelMap.videoGenModelConfig = {};
+        const cfg = json.responseMetadata.modelConfigOverride.modelMap.videoGenModelConfig;
+        out.oldVal = cfg.videoLength;
+        cfg.videoLength = len;
+        // Also stamp common top-level aliases when forcing (may still be ignored by Grok)
+        if (json.videoLength == null) json.videoLength = len;
+        if (json.durationSeconds == null) json.durationSeconds = len;
+        out.forced = true;
+        out.applied = true;
+        out.path = 'videoGenModelConfig.videoLength(forced)';
+        ge_imLastVideoMiss = true;
+        ge_imLastLengthPath = out.path;
+        ge_imLastLengthForced = true;
+        return out;
+    }
 
     // ── FAB triple-click hide/show ──────────────────────────────
     // Hidden state only survives a refresh when featureFabStayHidden is on; otherwise
@@ -213,6 +420,14 @@
         if (location.href !== lastUrl) {
             lastUrl = location.href;
             logoReplaced = false;
+            // Re-try the logo swap on navigation (with a few delayed retries for
+            // late-rendering SPA routes) instead of rescanning every mutation batch.
+            if (featureLogo) {
+                tryReplaceLogo();
+                setTimeout(tryReplaceLogo, 500);
+                setTimeout(tryReplaceLogo, 1500);
+                setTimeout(tryReplaceLogo, 3000);
+            }
             if (featurePrivacyMode) {
                 ge_maskPrivacyTitle();
                 // New route may have rendered fresh sidebar/command-menu items.
@@ -385,261 +600,6 @@
         }
     }
 
-    // ══════════════════════════════════════════════════════════════
-    //  3. DeMod — Moderation Bypass
-    // ══════════════════════════════════════════════════════════════
-    const DEMOD_CONFIG = {
-        defaultFlags: ['isFlagged', 'isBlocked', 'moderationApplied', 'restricted'],
-        messageKeys: ['message', 'content', 'text', 'error'],
-        moderationMessagePatterns: [
-            /this content has been moderated/i,
-            /sorry, i cannot assist/i,
-            /policy violation/i,
-            /blocked/i,
-            /moderated/i,
-            /restricted/i,
-            /content restricted/i,
-            /unable to process/i,
-            /cannot help/i,
-            /(sorry|apologies).*?(cannot|unable|help|assist)/i,
-        ],
-        clearedMessageText: '[Content cleared by Grok DeMod]',
-        recoveryTimeoutMs: 5000,
-        statusColors: {
-            safe: '#66ff66',
-            flagged: '#ffa500',
-            blocked: '#ff6666',
-            recovering: '#ffcc00',
-        },
-    };
-
-    let moderationFlags = getState('GrokDeModFlags', DEMOD_CONFIG.defaultFlags);
-    let demodInitCache = null;
-    let currentConversationId = null;
-
-    const ModerationResult = Object.freeze({ SAFE: 0, FLAGGED: 1, BLOCKED: 2 });
-
-    function timeoutPromise(ms, promise, desc = 'Promise') {
-        return new Promise((resolve, reject) => {
-            const timer = setTimeout(() => reject(new Error(`Timeout (${desc})`)), ms);
-            promise.then(v => { clearTimeout(timer); resolve(v); }, e => { clearTimeout(timer); reject(e); });
-        });
-    }
-
-    function getModerationResult(obj, path = '') {
-        if (typeof obj !== 'object' || obj === null) return ModerationResult.SAFE;
-        let result = ModerationResult.SAFE;
-        for (const key in obj) {
-            if (!obj.hasOwnProperty(key)) continue;
-            const cp = path ? `${path}.${key}` : key;
-            const value = obj[key];
-            if (key === 'isBlocked' && value === true) { logDebug(`Blocked: '${cp}'`); return ModerationResult.BLOCKED; }
-            if (moderationFlags.includes(key) && value === true) { logDebug(`Flagged: '${cp}'`); result = Math.max(result, ModerationResult.FLAGGED); }
-            if (DEMOD_CONFIG.messageKeys.includes(key) && typeof value === 'string') {
-                const c = value.toLowerCase();
-                for (const p of DEMOD_CONFIG.moderationMessagePatterns) {
-                    if (p.test(c)) {
-                        if (/blocked|moderated|restricted/i.test(p.source)) return ModerationResult.BLOCKED;
-                        result = Math.max(result, ModerationResult.FLAGGED);
-                        break;
-                    }
-                }
-                if (result === ModerationResult.SAFE && c.length < 70 && /(sorry|apologies|unable|cannot)/i.test(c))
-                    result = Math.max(result, ModerationResult.FLAGGED);
-            }
-            if (typeof value === 'object') {
-                const cr = getModerationResult(value, cp);
-                if (cr === ModerationResult.BLOCKED) return ModerationResult.BLOCKED;
-                result = Math.max(result, cr);
-            }
-        }
-        return result;
-    }
-
-    function clearFlagging(obj) {
-        if (typeof obj !== 'object' || obj === null) return obj;
-        if (Array.isArray(obj)) return obj.map(clearFlagging);
-        const out = {};
-        for (const key in obj) {
-            if (!obj.hasOwnProperty(key)) continue;
-            const v = obj[key];
-            if (moderationFlags.includes(key) && v === true) { out[key] = false; }
-            else if (DEMOD_CONFIG.messageKeys.includes(key) && typeof v === 'string') {
-                let replaced = false;
-                for (const p of DEMOD_CONFIG.moderationMessagePatterns) {
-                    if (p.test(v)) { out[key] = DEMOD_CONFIG.clearedMessageText; replaced = true; break; }
-                }
-                if (!replaced && v.length < 70 && /(sorry|apologies|unable|cannot)/i.test(v.toLowerCase())) {
-                    if (getModerationResult({ [key]: v }) === ModerationResult.FLAGGED) { out[key] = DEMOD_CONFIG.clearedMessageText; replaced = true; }
-                }
-                if (!replaced) out[key] = v;
-            }
-            else if (typeof v === 'object') out[key] = clearFlagging(v);
-            else out[key] = v;
-        }
-        return out;
-    }
-
-    function extractConversationIdFromUrl(url) {
-        const m = url.match(/\/conversation\/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/i);
-        return m ? m[1] : null;
-    }
-
-    async function redownloadLatestMessage() {
-        if (!currentConversationId) { panelAddLog('Recovery failed: No conversation ID.'); return null; }
-        if (!demodInitCache || !demodInitCache.headers) {
-            try {
-                const r = await _originalFetch(`/rest/app-chat/conversation/${currentConversationId}`, { method: 'GET', headers: { 'Accept': 'application/json' } });
-                if (r.ok) demodInitCache = { headers: new Headers({ 'Accept': 'application/json' }), credentials: 'include' };
-                else { panelAddLog('Recovery failed: Cannot get request data.'); return null; }
-            } catch (_) { panelAddLog('Recovery failed: Error getting request data.'); return null; }
-        }
-        panelAddLog('Attempting content recovery...');
-        const headers = new Headers(demodInitCache.headers);
-        if (!headers.has('Accept')) headers.set('Accept', 'application/json, text/plain, */*');
-        try {
-            const resp = await timeoutPromise(DEMOD_CONFIG.recoveryTimeoutMs,
-                _originalFetch(`/rest/app-chat/conversation/${currentConversationId}`, { method: 'GET', headers, credentials: demodInitCache.credentials || 'include' }),
-                'Recovery Fetch');
-            if (!resp.ok) { panelAddLog(`Recovery failed: HTTP ${resp.status}`); return null; }
-            const data = await resp.json();
-            const msgs = data?.messages;
-            if (!Array.isArray(msgs) || msgs.length === 0) { panelAddLog('Recovery failed: No messages found.'); return null; }
-            msgs.sort((a, b) => (b.timestamp ? new Date(b.timestamp).getTime() : 0) - (a.timestamp ? new Date(a.timestamp).getTime() : 0));
-            const latest = msgs[0];
-            if (!latest || typeof latest.content !== 'string' || !latest.content.trim()) { panelAddLog('Recovery failed: Invalid latest message.'); return null; }
-            panelAddLog('Recovery seems successful.');
-            return { content: latest.content };
-        } catch (e) { panelAddLog(`Recovery error: ${e.message}`); return null; }
-    }
-
-    async function processPotentialModeration(json, source) {
-        const mr = getModerationResult(json);
-        let out = json;
-        if (mr !== ModerationResult.SAFE) {
-            if (mr === ModerationResult.BLOCKED) {
-                panelAddLog(`Blocked content from ${source}.`);
-                panelUpdateStatus(mr, true);
-                const recovered = await redownloadLatestMessage();
-                if (recovered && recovered.content) {
-                    panelAddLog(`Recovery successful (${source}).`);
-                    let replaced = false;
-                    for (const k of [...DEMOD_CONFIG.messageKeys, 'text', 'message']) {
-                        if (typeof out[k] === 'string') { out[k] = recovered.content; replaced = true; break; }
-                    }
-                    if (!replaced) out.recovered_content = recovered.content;
-                    out = clearFlagging(out);
-                    panelUpdateStatus(mr, false);
-                } else {
-                    panelAddLog(`Recovery failed (${source}).`);
-                    out = clearFlagging(json);
-                    panelUpdateStatus(mr, false);
-                }
-            } else {
-                panelAddLog(`Flagged content cleared (${source}).`);
-                out = clearFlagging(json);
-                panelUpdateStatus(mr);
-            }
-        } else {
-            if (panelStatusEl && !panelStatusEl.textContent.includes('Blocked') && !panelStatusEl.textContent.includes('Flagged') && !panelStatusEl.textContent.includes('Recovering'))
-                panelUpdateStatus(mr);
-            else if (panelStatusEl && panelStatusEl.textContent.includes('Recovering'))
-                panelUpdateStatus(ModerationResult.SAFE);
-        }
-        return out;
-    }
-
-    // Tracks the active conversation ID from either the initial GET request
-    // or the first response that reveals it, and caches the auth headers
-    // needed later for the DeMod recovery re-fetch.
-    function ge_trackConversationId(url, requestArgs) {
-        const convGetMatch = url.match(/\/rest\/app-chat\/conversation\/([a-f0-9-]+)$/i);
-        if (convGetMatch && requestArgs?.method === 'GET') {
-            demodInitCache = { headers: new Headers(requestArgs.headers), credentials: requestArgs.credentials || 'include' };
-            if (!currentConversationId) currentConversationId = convGetMatch[1];
-        }
-        if (!currentConversationId) { const id = extractConversationIdFromUrl(url); if (id) currentConversationId = id; }
-    }
-
-    function ge_handleSSEResponse(response) {
-        const reader = response.body.getReader();
-        const stream = new ReadableStream({
-            async start(controller) {
-                let buffer = '';
-                let currentEvent = { data: '', type: 'message', id: null };
-                try {
-                    while (true) {
-                        const { done, value } = await reader.read();
-                        if (done) {
-                            if (buffer.trim() && (buffer.startsWith('{') || buffer.startsWith('['))) {
-                                try { let j = JSON.parse(buffer); j = await processPotentialModeration(j, 'SSE-Final'); controller.enqueue(_encoder.encode(`data: ${JSON.stringify(j)}\n\n`)); }
-                                catch (_) { controller.enqueue(_encoder.encode(`data: ${buffer}\n\n`)); }
-                            } else if (buffer.trim()) {
-                                controller.enqueue(_encoder.encode(`data: ${buffer}\n\n`));
-                            } else if (currentEvent.data) {
-                                try { let j = JSON.parse(currentEvent.data); j = await processPotentialModeration(j, 'SSE-Event'); controller.enqueue(_encoder.encode(`data: ${JSON.stringify(j)}\n\n`)); }
-                                catch (_) { controller.enqueue(_encoder.encode(`data: ${currentEvent.data}\n\n`)); }
-                            }
-                            controller.close(); break;
-                        }
-                        buffer += _decoder.decode(value, { stream: true });
-                        let lines = buffer.split('\n');
-                        buffer = lines.pop() || '';
-                        for (const line of lines) {
-                            if (line.trim() === '') {
-                                if (currentEvent.data) {
-                                    if (currentEvent.data.startsWith('{') || currentEvent.data.startsWith('[')) {
-                                        try {
-                                            let j = JSON.parse(currentEvent.data);
-                                            if (j.conversation_id && !currentConversationId) currentConversationId = j.conversation_id;
-                                            j = await processPotentialModeration(j, 'SSE');
-                                            controller.enqueue(_encoder.encode(`data: ${JSON.stringify(j)}\n\n`));
-                                        } catch (_) { controller.enqueue(_encoder.encode(`data: ${currentEvent.data}\n\n`)); }
-                                    } else {
-                                        controller.enqueue(_encoder.encode(`data: ${currentEvent.data}\n\n`));
-                                    }
-                                }
-                                currentEvent = { data: '', type: 'message', id: null };
-                            } else if (line.startsWith('data:')) {
-                                currentEvent.data += (currentEvent.data ? '\n' : '') + line.substring(5).trim();
-                            } else if (line.startsWith('event:')) {
-                                currentEvent.type = line.substring(6).trim();
-                            } else if (line.startsWith('id:')) {
-                                currentEvent.id = line.substring(3).trim();
-                            }
-                        }
-                    }
-                } catch (e) { controller.error(e); } finally { reader.releaseLock(); }
-            }
-        });
-        return new Response(stream, { status: response.status, statusText: response.statusText, headers: new Headers(response.headers) });
-    }
-
-    async function ge_handleJSONResponse(response, original_response) {
-        try {
-            const text = await response.text();
-            let json = JSON.parse(text);
-            if (json.conversation_id && !currentConversationId) currentConversationId = json.conversation_id;
-            json = await processPotentialModeration(json, 'Fetch');
-            const body = JSON.stringify(json);
-            const nh = new Headers(response.headers);
-            if (nh.has('content-length')) nh.set('content-length', _encoder.encode(body).byteLength.toString());
-            return new Response(body, { status: response.status, statusText: response.statusText, headers: nh });
-        } catch (_) { return original_response; }
-    }
-
-    async function handleFetchResponse(original_response, url, requestArgs) {
-        const response = original_response.clone();
-        if (!response.ok) return original_response;
-        const ct = response.headers.get('Content-Type')?.toLowerCase() || '';
-
-        ge_trackConversationId(url, requestArgs);
-
-        if (ct.includes('text/event-stream')) return ge_handleSSEResponse(response);
-        if (ct.includes('application/json')) return ge_handleJSONResponse(response, original_response);
-        return original_response;
-    }
-
     // ── Install fetch interceptor ────────────────────────────────
     _win.fetch = async function (input, init) {
         let url;
@@ -700,56 +660,51 @@
             }
         }
 
-        // ── Imagine Menu: Video length override ──
+        // ── Imagine Menu: Video length override + prompt inject ──
         if (featureImagineMenu && ge_imInterceptOn && isChatPost) {
             try {
-                let bodyText2 = null;
-                if (typeof requestArgs.body === 'string') {
-                    bodyText2 = requestArgs.body;
-                } else if (isReqObj) {
-                    const cloned2 = input.clone();
-                    bodyText2 = await cloned2.text();
-                }
+                const bodyText2 = await ge_readRequestBody(input, requestArgs, isReqObj);
                 if (bodyText2) {
                     const json2 = JSON.parse(bodyText2);
-                    const hasVideoGen = json2.toolOverrides?.videoGen !== undefined;
-                    const hasVideoConfig = json2.responseMetadata?.modelConfigOverride?.modelMap?.videoGenModelConfig;
-                    if (hasVideoGen || hasVideoConfig) {
-                        if (!json2.responseMetadata) json2.responseMetadata = {};
-                        if (!json2.responseMetadata.modelConfigOverride) json2.responseMetadata.modelConfigOverride = {};
-                        if (!json2.responseMetadata.modelConfigOverride.modelMap) json2.responseMetadata.modelConfigOverride.modelMap = {};
-                        if (!json2.responseMetadata.modelConfigOverride.modelMap.videoGenModelConfig)
-                            json2.responseMetadata.modelConfigOverride.modelMap.videoGenModelConfig = {};
-                        const cfg = json2.responseMetadata.modelConfigOverride.modelMap.videoGenModelConfig;
-                        const oldLen = cfg.videoLength;
-                        cfg.videoLength = ge_imVideoLength;
+                    let bodyChanged = false;
+                    const videoTouched = ge_imApplyVideoLength(json2, ge_imVideoLength);
+                    if (videoTouched.applied) {
                         ge_imInterceptCount++;
-                        logDebug(`[ImagineMenu] Video length ${oldLen || 'default'} → ${ge_imVideoLength} (#${ge_imInterceptCount})`);
-                        const newBody2 = JSON.stringify(json2);
-                        if (isReqObj) { input = new Request(input, { body: newBody2 }); requestArgs = init || {}; }
-                        else { requestArgs = { ...requestArgs, body: newBody2 }; }
+                        ge_imLastLengthPath = videoTouched.path;
+                        ge_imLastLengthForced = !!videoTouched.forced;
+                        logDebug(`[ImagineMenu] Video length ${videoTouched.oldVal ?? 'default'} → ${ge_imVideoLength} via ${videoTouched.path}${videoTouched.forced ? ' (forced/maybe-patched)' : ''} (#${ge_imInterceptCount})`);
+                        bodyChanged = true;
+                        ge_updateImStatus();
+                    } else if (videoTouched.looksLikeVideo) {
+                        logDebug('[ImagineMenu] Video request, no length field. Keys:', Object.keys(json2));
+                        ge_imLastVideoMiss = true;
+                        ge_imLastLengthPath = null;
+                        ge_imLastLengthForced = false;
                         ge_updateImStatus();
                     }
-                    // ── Imagine Menu: Prompt injection ──
                     if (ge_imActivePromptId) {
                         const prompts = ge_getPrompts();
                         const ap = prompts.find(p => p.id === ge_imActivePromptId);
-                        if (ap && ap.text) {
+                        const apText = ap && (ap.text || ap.body);
+                        if (ap && apText) {
                             const msgK = ['message', 'content', 'text', 'prompt'].find(k => typeof json2[k] === 'string');
-                            if (msgK && !json2[msgK].includes(ap.text)) {
-                                json2[msgK] = ap.text + '\n\n' + json2[msgK];
-                                logDebug('[ImagineMenu] Injected prompt:', ap.name);
+                            if (msgK && !json2[msgK].includes(apText)) {
+                                json2[msgK] = apText + '\n\n' + json2[msgK];
+                                logDebug('[ImagineMenu] Injected prompt:', ap.title || ap.name);
+                                bodyChanged = true;
                             }
-                            // Clear active prompt if not auto-retry
                             if (!ge_imAutoRetry) {
                                 ge_imActivePromptId = null;
                                 setState('GrokEnhancer_ActivePromptId', null);
                                 ge_updateImActiveLabel();
                             }
-                            const nb = JSON.stringify(json2);
-                            if (isReqObj) { input = new Request(input, { body: nb }); requestArgs = init || {}; }
-                            else { requestArgs = { ...requestArgs, body: nb }; }
                         }
+                    }
+                    if (bodyChanged) {
+                        const nb = JSON.stringify(json2);
+                        const next = ge_withNewBody(input, init, requestArgs, isReqObj, nb);
+                        input = next.input;
+                        requestArgs = next.requestArgs;
                     }
                 }
             } catch (err2) {
@@ -768,77 +723,25 @@
             return resp;
         }
 
-        if (!featureDeMod) {
-            const p0 = _originalFetch.call(this, input, requestArgs);
-            if (rl_pendingModel) rl_trackUsageAndLimit(rl_pendingModel, p0);
-            return p0;
-        }
-        if (!url.includes('/rest/app-chat/')) return _originalFetch.call(this, input, requestArgs);
-
-        if (method === 'POST') {
-            const id = extractConversationIdFromUrl(url);
-            if (id) {
-                if (!currentConversationId) currentConversationId = id;
-                const hdrs = requestArgs.headers || (isReqObj ? input.headers : null);
-                if (!demodInitCache && hdrs) demodInitCache = { headers: new Headers(hdrs), credentials: requestArgs.credentials || (isReqObj ? input.credentials : 'include') };
-            }
-            const p1 = _originalFetch.call(this, input, requestArgs);
-            if (rl_pendingModel) rl_trackUsageAndLimit(rl_pendingModel, p1);
-            return p1;
-        }
-        try {
+        // ── Weekly SuperGrok usage (Settings → Usage) ──
+        if (url.includes('GetGrokCreditsConfig')) {
             const resp = await _originalFetch.call(this, input, requestArgs);
-            return await handleFetchResponse(resp, url, requestArgs);
-        } catch (e) { throw e; }
-    };
-
-    // ── Install WebSocket interceptor ────────────────────────────
-    _win.WebSocket = new Proxy(_OriginalWebSocket, {
-        construct(target, args) {
-            const ws = new target(...args);
-            let originalOnMessageHandler = null;
-            Object.defineProperty(ws, 'onmessage', {
-                configurable: true, enumerable: true,
-                get() { return originalOnMessageHandler; },
-                async set(handler) {
-                    originalOnMessageHandler = handler;
-                    ws.onmessageinternal = async function (event) {
-                        if (!featureDeMod || typeof event.data !== 'string' || !event.data.startsWith('{')) {
-                            if (originalOnMessageHandler) try { originalOnMessageHandler.call(ws, event); } catch (_) { }
-                            return;
-                        }
-                        try {
-                            let json = JSON.parse(event.data);
-                            if (json.conversation_id && json.conversation_id !== currentConversationId) currentConversationId = json.conversation_id;
-                            const processed = await processPotentialModeration(json, 'WebSocket');
-                            const ne = new MessageEvent('message', { data: JSON.stringify(processed), origin: event.origin, lastEventId: event.lastEventId, source: event.source, ports: event.ports });
-                            if (originalOnMessageHandler) try { originalOnMessageHandler.call(ws, ne); } catch (_) { }
-                        } catch (_) {
-                            if (originalOnMessageHandler) try { originalOnMessageHandler.call(ws, event); } catch (_2) { }
-                        }
-                    };
-                    ws.addEventListener('message', ws.onmessageinternal);
+            try {
+                if (resp.ok && featureWeeklyUsage) {
+                    const buf = await resp.clone().arrayBuffer();
+                    if (typeof ge_wuIngestBuffer === 'function') ge_wuIngestBuffer(buf, 'intercept');
                 }
-            });
-            const wrapHandler = (eventName) => {
-                let oh = null;
-                Object.defineProperty(ws, `on${eventName}`, {
-                    configurable: true, enumerable: true,
-                    get() { return oh; },
-                    set(handler) {
-                        oh = handler;
-                        ws.addEventListener(eventName, (e) => {
-                            if (eventName === 'message') return;
-                            if (oh) try { oh.call(ws, e); } catch (_) { }
-                        });
-                    }
-                });
-            };
-            wrapHandler('close');
-            wrapHandler('error');
-            return ws;
+            } catch (_) { /* never break site */ }
+            return resp;
         }
-    });
+
+        const p0 = _originalFetch.call(this, input, requestArgs);
+        if (rl_pendingModel) {
+            rl_trackUsageAndLimit(rl_pendingModel, p0);
+            if (featureWeeklyUsage && typeof ge_wuScheduleSoftRefresh === 'function') ge_wuScheduleSoftRefresh();
+        }
+        return p0;
+    };
 
     // Shared "get-or-create a <style> element, set/clear its CSS" toggle used by every
     // CSS-only hide feature below (popups, premium upsells, model dropdown, privacy).
@@ -904,6 +807,21 @@
                 }
                 /* Imagine button with sparkle decoration — hide entire container */
                 span:has([data-sparkle-wrapper]) {
+                    display: none !important;
+                }
+            `);
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    //  3c1b. Hide composer typeahead / autocomplete (new chat suggestions)
+    // ══════════════════════════════════════════════════════════════
+    const COMPOSER_SUGGESTIONS_STYLE_ID = 'ge-hide-composer-suggestions-css';
+
+    function ge_applyComposerSuggestionsHideCSS(on) {
+        // Grok's new-chat typeahead is a plain <ul> of <li> rows with
+        // .typeahead-mask — no role="listbox". Only that list is hidden.
+        ge_applyToggleStyle(COMPOSER_SUGGESTIONS_STYLE_ID, on, `
+                ul:has(.typeahead-mask) {
                     display: none !important;
                 }
             `);
@@ -1042,7 +960,7 @@
     }
 
     // ══════════════════════════════════════════════════════════════
-    //  3c3. Hide Sidebar Nav Items (Build / Imagine / Skills and Connectors)
+    //  3c3. Hide Sidebar Nav Items (Build / Imagine / Skills and Connectors / Automations)
     // ══════════════════════════════════════════════════════════════
     // Matched by visible label text rather than href — Build's href isn't confirmed
     // from the reference markup, and text-matching keeps Imagine/Skills-and-Connectors
@@ -1051,6 +969,7 @@
         { key: 'build', label: 'Build', get: () => featureHideBuildNav },
         { key: 'imagine', label: 'Imagine', get: () => featureHideImagineNav },
         { key: 'skills', label: 'Skills and Connectors', get: () => featureHideSkillsNav },
+        { key: 'automations', label: 'Automations', get: () => featureHideAutomationsNav },
     ];
 
     function ge_scanSidebarNavHide() {
@@ -1066,6 +985,20 @@
             const target = link.closest('[data-sidebar="group"]') || link.closest('[data-sidebar="menu-item"]');
             if (target) target.setAttribute('data-ge-navhide', '1');
         });
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    //  3c4. Hide Private Chat Notice
+    // ══════════════════════════════════════════════════════════════
+    // The "This chat won't appear in your history…" banner shown above
+    // private/temporary chats. Pure CSS hide, anchored on the notice's
+    // bg-surface-base span so it can't match unrelated composer rows.
+    function ge_applyPrivateNoticeHideCSS(on) {
+        ge_applyToggleStyle('ge-private-notice-hide-css', on, `
+                div.py-4.mx-auto:has(> span.bg-surface-base) {
+                    display: none !important;
+                }
+        `);
     }
 
     // ══════════════════════════════════════════════════════════════
@@ -1103,6 +1036,7 @@
             selector: 'button',
             test: btn => /^upgrade\s+to\s+heavy$/i.test(btn.textContent.trim()),
             hideAttr: 'data-ge-hidden', hideValue: 'upgrade-heavy',
+            checkedAttr: 'data-ge-heavy-checked',
         });
     }
 
@@ -1458,7 +1392,7 @@
     // our data-ge-privacy-* attributes off an existing node without removing/adding
     // it, so the childList-only observers elsewhere never notice — Privacy Mode then
     // silently "un-hides" until the next full page load. Watch for that churn too.
-    // ponytail: body-wide attribute watch, not a per-node retry-attach; cheap no-op
+    // Body-wide attribute watch, not a per-node retry-attach; cheap no-op
     // when Privacy Mode is off, upgrade to a scoped observer if this proves too broad.
     let _ge_privacyGuardTimer = null;
     function ge_startPrivacyGuardObserver() {
@@ -1694,7 +1628,7 @@
         });
         if (!sensitive) return;
 
-        // ponytail: exact header selector unverified against live grok.com DOM — matched by
+        // Exact header selector unverified against live grok.com DOM — matched by
         // text against the known sidebar title instead of a brittle guessed classname.
         const heading = [...document.querySelectorAll('main h1, main h2, [role="heading"]')]
             .find(el => el.textContent.trim() === cached.text && !el.closest('[data-sidebar]'));
@@ -2009,7 +1943,12 @@
     // locally-tracked usage history, since Grok's own remaining-count can lag) ──
     const RL_STATE_DEFAULTS = { totalQueries: 40, windowSizeSeconds: 7200, usage: [] };
     let rl_state = getState('grok_state', {});
-    function rl_saveState() { setState('grok_state', rl_state); }
+    function rl_saveState() {
+        // Skip the localStorage write when nothing actually changed (this runs
+        // on every 30s poll and on debounced composer mutations).
+        try { if (localStorage.getItem('grok_state') === JSON.stringify(rl_state)) return; } catch (_) {}
+        setState('grok_state', rl_state);
+    }
     function rl_cleanupOldUsages() {
         let changed = false;
         const now = Date.now();
@@ -2021,7 +1960,7 @@
         }
         if (changed) rl_saveState();
     }
-    setInterval(rl_cleanupOldUsages, 60000);
+    if (featureRateLimit) setInterval(rl_cleanupOldUsages, 60000);
     function rl_getRemainingLocally(model, apiTotal, windowSize) {
         if (!rl_state[model]) rl_state[model] = JSON.parse(JSON.stringify(RL_STATE_DEFAULTS));
         if (apiTotal != null) rl_state[model].totalQueries = apiTotal;
@@ -2108,13 +2047,14 @@
             }
         }).catch(() => {});
     }
-    const RL_DEFAULT_MODEL = "grok-4";
+    const RL_DEFAULT_MODEL = "grok-4-auto";
     const RL_DEFAULT_KIND  = "DEFAULT";
     const RL_POLL_MS       = 30000;
     const RL_MODEL_SEL     = "button[aria-label='Model select']";
     const RL_QBAR_SEL      = ".query-bar";
     const RL_CONTAINER_ID  = "grok-rate-limit";
     const rl_cache = {};
+    let rl_lastApiError = null;
 
     let rl_countdownTimer = null, rl_isCounting = false;
     let rl_lastQueryBar = null, rl_lastModelObs = null, rl_lastThinkObs = null, rl_lastSearchObs = null, rl_lastBodyObs = null;
@@ -2157,6 +2097,28 @@
         return ctx.measureText(text).width;
     }
 
+    // Shared: true when composer typeahead / autocomplete is visible.
+    // New-chat Grok uses <ul> + .typeahead-mask (no ARIA listbox). Also
+    // keeps legacy listbox / aria-expanded checks for other surfaces.
+    function ge_composerSuggestionsOpen(inp) {
+        try {
+            const typeaheadUl = document.querySelector('ul:has(.typeahead-mask)');
+            if (typeaheadUl && typeaheadUl.getClientRects().length) return true;
+            if (inp && inp.getAttribute && inp.getAttribute('aria-expanded') === 'true') return true;
+            const expanded = document.querySelector(
+                '[role="combobox"][aria-expanded="true"], textarea[aria-expanded="true"], [contenteditable="true"][aria-expanded="true"]'
+            );
+            if (expanded && expanded.getClientRects().length) return true;
+            const lb = document.querySelector('[role="listbox"]');
+            if (lb && lb.getClientRects().length) return true;
+        } catch (_) {}
+        return false;
+    }
+
+    function rl_suggestionsOpen(inp) {
+        return ge_composerSuggestionsOpen(inp);
+    }
+
     function rl_checkOverlap(qb) {
         const rc = document.getElementById(RL_CONTAINER_ID);
         if (!rc) return;
@@ -2177,7 +2139,7 @@
             const phWidth = rl_textWidth(inp.placeholder, `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`);
             if (phWidth > avail) txt = lim + 1;
         }
-        const hide = txt > lim;
+        const hide = rl_suggestionsOpen(inp) || txt > lim;
         if (hide && !rl_isHidden) {
             rc.style.transition = 'transform 0.2s ease-out, opacity 0.2s ease-out';
             rc.style.transform = 'translateX(100%)'; rc.style.opacity = '0';
@@ -2190,16 +2152,37 @@
         }
     }
 
+    let rl_popupObs = null;
+    let rl_composerObs = null;
     function rl_startOverlap(qb) {
         if (rl_overlapInterval) clearInterval(rl_overlapInterval);
         rl_overlapInterval = setInterval(() => {
             if (document.body.contains(qb)) rl_checkOverlap(qb);
             else { clearInterval(rl_overlapInterval); rl_overlapInterval = null; }
         }, 500);
+        // Typeahead can portal to <body> OR mount as a sibling under the
+        // composer column (new chat uses the latter with .typeahead-mask).
+        if (rl_popupObs) rl_popupObs.disconnect();
+        rl_popupObs = new MutationObserver(rl_debounce(() => rl_checkOverlap(qb), 300));
+        rl_popupObs.observe(document.body, { childList: true });
+        if (rl_composerObs) rl_composerObs.disconnect();
+        const composerRoot = qb.closest('form')?.parentElement || qb.parentElement || qb;
+        rl_composerObs = new MutationObserver(rl_debounce(() => rl_checkOverlap(qb), 300));
+        rl_composerObs.observe(composerRoot, { childList: true, subtree: true });
+        const inp = qb.querySelector('div[contenteditable="true"], textarea');
+        if (inp && !inp._ge_rlSugBound) {
+            inp._ge_rlSugBound = true;
+            const kick = () => rl_checkOverlap(qb);
+            inp.addEventListener('input', kick);
+            inp.addEventListener('keyup', kick);
+            inp.addEventListener('focus', kick);
+        }
     }
 
     function rl_stopOverlap() {
         if (rl_overlapInterval) { clearInterval(rl_overlapInterval); rl_overlapInterval = null; }
+        if (rl_popupObs) { rl_popupObs.disconnect(); rl_popupObs = null; }
+        if (rl_composerObs) { rl_composerObs.disconnect(); rl_composerObs = null; }
         rl_isHidden = false;
     }
 
@@ -2277,7 +2260,9 @@
 
     function rl_appendDivider(par) {
         const d = document.createElement('div');
-        d.className = 'h-6 w-[2px] bg-border-l2 mx-1';
+        // Inline styles (not Tailwind classes) so thickness/color always apply —
+        // arbitrary classes like w-[2px] only work if Grok's own CSS generated them.
+        d.style.cssText = 'width:3px;height:16px;border-radius:2px;background:currentColor;opacity:0.45;margin:0 7px;flex:none;';
         par.appendChild(d);
     }
 
@@ -2329,9 +2314,17 @@
             const cd = document.createElement('div'); cd.className = 'flex items-center';
             rc.appendChild(svg); rc.appendChild(cd);
 
-            const tc = qb.querySelector('div.ms-auto.flex.flex-row.items-end.gap-1');
-            if (tc) tc.prepend(rc);
-            else { const bb = qb.querySelector('div.absolute.inset-x-0.bottom-0'); if (bb) bb.appendChild(rc); else { rc.remove(); return; } }
+            const modelBtn = qb.querySelector(RL_MODEL_SEL);
+            const modelWrap = modelBtn?.closest('.z-20') || modelBtn;
+            const tc = qb.querySelector('div.ms-auto.flex.flex-row.items-end.gap-1')
+                || qb.querySelector('div.ms-auto.flex.flex-row.items-end');
+            if (modelWrap?.parentNode) modelWrap.parentNode.insertBefore(rc, modelWrap);
+            else if (tc) tc.prepend(rc);
+            else {
+                const bb = qb.querySelector('div.absolute.inset-x-0.bottom-0');
+                if (bb) bb.appendChild(rc);
+                else { rc.remove(); logDebug('[RateLimit] no mount point in query bar'); return; }
+            }
         }
 
         const cd = rc.lastChild, svg = rc.querySelector('svg');
@@ -2339,15 +2332,42 @@
         const isBoth = effort === 'both';
 
         if (resp.error) {
+            const localFallback = () => {
+                try {
+                    const m = rl_lastModelName || RL_DEFAULT_MODEL;
+                    const key = m === 'grok-4-auto' ? 'grok-4' : m;
+                    const b = rl_getRemainingLocally(key, null, null);
+                    if (b && typeof b.remaining === 'number') return b.remaining;
+                } catch (_) {}
+                return null;
+            };
             if (isBoth) {
                 if (rl_lastBoth.high !== null && rl_lastBoth.low !== null) {
                     rl_appendSpan(cd, rl_lastBoth.high, ''); rl_appendDivider(cd); rl_appendSpan(cd, rl_lastBoth.low, '');
                     rc.title = `High: ${rl_lastBoth.high} | Low: ${rl_lastBoth.low} queries remaining`;
-                } else { rl_appendSpan(cd, 'Unavailable', ''); rc.title = 'Unavailable'; }
+                } else {
+                    const loc = localFallback();
+                    if (loc !== null) {
+                        rl_appendSpan(cd, loc, '#f59e0b');
+                        rc.title = `Local estimate (API: ${rl_lastApiError || 'error'}). Click to retry.`;
+                    } else {
+                        rl_appendSpan(cd, '—', '#f59e0b');
+                        rc.title = `Rate limit API offline${rl_lastApiError ? ': ' + rl_lastApiError : ''}. Click to retry.`;
+                    }
+                }
             } else {
                 const lf = effort === 'high' ? rl_lastHigh : rl_lastLow;
                 if (lf.remaining !== null) { rl_appendSpan(cd, lf.remaining, ''); rc.title = `${lf.remaining} queries remaining`; }
-                else { rl_appendSpan(cd, 'Unavailable', ''); rc.title = 'Unavailable'; }
+                else {
+                    const loc = localFallback();
+                    if (loc !== null) {
+                        rl_appendSpan(cd, loc, '#f59e0b');
+                        rc.title = `Local estimate (API: ${rl_lastApiError || 'error'}). Click to retry.`;
+                    } else {
+                        rl_appendSpan(cd, '—', '#f59e0b');
+                        rc.title = `Rate limit API offline${rl_lastApiError ? ': ' + rl_lastApiError : ''}. Click to retry.`;
+                    }
+                }
             }
             rl_setGaugeSVG(svg);
         } else {
@@ -2398,32 +2418,63 @@
 
     async function rl_fetchLimit(model, kind, force = false) {
         if (!force) { const c = rl_cache[model]?.[kind]; if (c !== undefined) return c; }
+        const body = { requestKind: kind, modelName: model };
         try {
+            logDebug('[RateLimit] fetch', body);
             const r = await _originalFetch(window.location.origin + '/rest/rate-limits', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ requestKind: kind, modelName: model }), credentials: 'include',
+                body: JSON.stringify(body), credentials: 'include',
             });
-            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            if (!r.ok) {
+                rl_lastApiError = `HTTP ${r.status}`;
+                logDebug('[RateLimit] API error', rl_lastApiError);
+                throw new Error(rl_lastApiError);
+            }
             const d = await r.json();
+            rl_lastApiError = null;
+            logDebug('[RateLimit] API ok keys', Object.keys(d || {}));
             if (!rl_cache[model]) rl_cache[model] = {};
             rl_cache[model][kind] = d; return d;
-        } catch (_) {
+        } catch (e) {
+            if (!rl_lastApiError) rl_lastApiError = e?.message || 'network';
             if (!rl_cache[model]) rl_cache[model] = {};
             rl_cache[model][kind] = undefined; return { error: true };
         }
+    }
+
+    function rl_getWaitTime(obj) {
+        if (!obj) return 0;
+        if (obj.waitTimeSeconds) return obj.waitTimeSeconds;
+        if (obj.resetsAt) {
+            const wait = Math.round((obj.resetsAt - Date.now()) / 1000);
+            return wait > 0 ? wait : 0;
+        }
+        if (obj.resetTime) return obj.resetTime;
+        return 0;
     }
 
     function rl_processData(data, effort) {
         if (data.error) return data;
         if (effort === 'both') {
             const h = data.highEffortRateLimits?.remainingQueries, l = data.lowEffortRateLimits?.remainingQueries;
-            const w = Math.max(data.highEffortRateLimits?.waitTimeSeconds || 0, data.lowEffortRateLimits?.waitTimeSeconds || 0, data.waitTimeSeconds || 0);
-            return (h !== undefined && l !== undefined) ? { highRemaining: h, lowRemaining: l, waitTimeSeconds: w } : { error: true };
+            const w = Math.max(rl_getWaitTime(data.highEffortRateLimits), rl_getWaitTime(data.lowEffortRateLimits), rl_getWaitTime(data));
+            if (h !== undefined && l !== undefined && h !== null && l !== null) {
+                return { highRemaining: h, lowRemaining: l, waitTimeSeconds: w };
+            }
+            if (data.remainingQueries !== undefined) {
+                return { highRemaining: data.remainingQueries, lowRemaining: data.remainingQueries, waitTimeSeconds: w };
+            }
+            logDebug('[RateLimit] processData both: unrecognized shape', Object.keys(data || {}));
+            return { error: true };
         }
         const rk = effort === 'high' ? 'highEffortRateLimits' : 'lowEffortRateLimits';
         let rem = data[rk]?.remainingQueries;
         if (rem === undefined) rem = data.remainingQueries;
-        return rem !== undefined ? { remainingQueries: rem, waitTimeSeconds: data[rk]?.waitTimeSeconds || data.waitTimeSeconds || 0 } : { error: true };
+        if (rem === undefined) {
+            logDebug('[RateLimit] processData: no remainingQueries', Object.keys(data || {}));
+            return { error: true };
+        }
+        return { remainingQueries: rem, waitTimeSeconds: rl_getWaitTime(data[rk]) || rl_getWaitTime(data) };
     }
 
     // Reconcile the API's reported totals/window into the locally-tracked usage
@@ -2492,7 +2543,7 @@
             }
         }
 
-        rl_lastBodyObs = new MutationObserver(() => {
+        rl_lastBodyObs = new MutationObserver(rl_debounce(() => {
             if (rl_isImagine()) {
                 rl_removeExisting(); rl_stopOverlap();
                 if (rl_lastModelObs) { rl_lastModelObs.disconnect(); rl_lastModelObs = null; }
@@ -2524,7 +2575,7 @@
                 rl_lastInput = null; rl_lastSubmit = null;
                 if (rl_pollInterval) { clearInterval(rl_pollInterval); rl_pollInterval = null; }
             }
-        });
+        }, 300));
         rl_lastBodyObs.observe(document.body, { childList: true, subtree: true });
     }
 
@@ -2559,7 +2610,7 @@
         if (inp && inp !== rl_lastInput) {
             rl_lastInput = inp;
             const dc = rl_debounce(() => rl_checkOverlap(qb), 300);
-            inp.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) setTimeout(() => rl_fetchAndUpdate(qb, true), 3000); });
+            inp.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { setTimeout(() => rl_checkOverlap(qb), 50); setTimeout(() => rl_fetchAndUpdate(qb, true), 3000); } });
             inp.addEventListener('input', dc);
             inp.addEventListener('focus', dc);
             inp.addEventListener('blur', () => setTimeout(() => rl_checkOverlap(qb), 200));
@@ -2568,27 +2619,643 @@
         const sub = bb ? rl_findEl(rl_finders.submitButton, bb) : rl_findEl(rl_finders.submitButton, qb);
         if (sub && sub !== rl_lastSubmit) {
             rl_lastSubmit = sub;
-            sub.addEventListener('click', () => setTimeout(() => rl_fetchAndUpdate(qb, true), 3000));
+            sub.addEventListener('click', () => { setTimeout(() => rl_checkOverlap(qb), 50); setTimeout(() => rl_fetchAndUpdate(qb, true), 3000); });
         }
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    //  4b. Weekly SuperGrok Usage — micro strip (body-mounted, safe)
+    //  NEVER inject into React trees. Fixed under composer via measure.
+    //  Data: GetGrokCreditsConfig (same as Settings → Usage)
+    // ══════════════════════════════════════════════════════════════
+    const GE_WU_ID = 'ge-weekly-usage';
+    const GE_WU_CSS_ID = 'ge-weekly-usage-css';
+    const GE_WU_POLL_MS = 5 * 60 * 1000;
+    const GE_WU_PRODUCT_NAMES = {
+        0: '3rd Party', 1: 'API', 2: 'Grok Build', 3: 'Grok Plugins',
+        4: 'Chat', 5: 'Imagine', 6: 'Voice'
+    };
+    // Electric-blue alpha ramp for segments, mirroring Settings → Usage
+    // (1 / 0.7 / 0.45 first, extra shades only if more products appear).
+    const GE_WU_SEG_ALPHAS = [1, 0.7, 0.45, 0.85, 0.55, 0.35, 0.25];
+
+    let ge_wuCache = null;       // { usagePercent, productUsage, periodEnd, at }
+    let ge_wuPollTimer = null;
+    let ge_wuSoftTimer = null;
+    let ge_wuPosTimer = null;
+    let ge_wuPosInterval = null;
+    let ge_wuPopupObs = null;
+    let ge_wuComposerObs = null;
+    let ge_wuModalObs = null;
+    let ge_wuComposerRoot = null;
+    let ge_wuFetching = false;
+    let ge_wuListenersOn = false;
+    let ge_wuLastSegSig = '';
+    let ge_wuLastLabel = '';
+    let ge_wuLastBox = { left: 0, top: 0, width: 0 };
+
+    function ge_wuDecodeVarint(buf, offset) {
+        let result = 0, shift = 0, pos = offset;
+        while (pos < buf.length) {
+            const byte = buf[pos++];
+            result |= (byte & 0x7f) << shift;
+            if ((byte & 0x80) === 0) break;
+            shift += 7;
+        }
+        return { value: result, next: pos };
+    }
+
+    function ge_wuParseProtobufTimestamp(buf, offset, length) {
+        const end = offset + length;
+        let pos = offset, seconds = 0, nanos = 0;
+        while (pos < end) {
+            const tag = buf[pos++];
+            const field = tag >> 3, wire = tag & 0x07;
+            if (wire === 0) {
+                const d = ge_wuDecodeVarint(buf, pos);
+                pos = d.next;
+                if (field === 1) seconds = d.value;
+                else if (field === 2) nanos = d.value;
+            } else break;
+        }
+        if (!seconds) return null;
+        return new Date(seconds * 1000 + nanos / 1e6).toISOString();
+    }
+
+    function ge_wuParseCreditsConfig(buffer) {
+        const buf = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+        if (buf.length < 10) return null;
+        let usagePercent = null;
+        const productUsage = [];
+        let periodStart = null, periodEnd = null;
+
+        for (let i = 0; i < buf.length - 5; i++) {
+            if (buf[i] === 0x0d) {
+                try {
+                    const view = new DataView(buf.buffer, buf.byteOffset + i + 1, 4);
+                    const val = Math.round(view.getFloat32(0, true));
+                    if (val >= 0 && val <= 100) { usagePercent = val; break; }
+                } catch (_) {}
+            }
+        }
+        for (let i = 0; i < buf.length - 7; i++) {
+            if (buf[i] === 0x3a && buf[i + 1] === 0x07 && buf[i + 2] === 0x08 && buf[i + 4] === 0x15) {
+                try {
+                    const product = buf[i + 3];
+                    const view = new DataView(buf.buffer, buf.byteOffset + i + 5, 4);
+                    const pct = Math.round(view.getFloat32(0, true));
+                    if (pct >= 0 && pct <= 100) productUsage.push({ product, usagePercent: pct });
+                } catch (_) {}
+            }
+        }
+        for (let i = 0; i < buf.length - 4; i++) {
+            if (buf[i] === 0x42 && buf[i + 1] > 0 && buf[i + 1] < 40) {
+                const blockLen = buf[i + 1];
+                const blockStart = i + 2;
+                const blockEnd = blockStart + blockLen;
+                if (blockEnd > buf.length) continue;
+                let pos = blockStart;
+                while (pos < blockEnd - 1) {
+                    const tag = buf[pos++];
+                    const field = tag >> 3, wire = tag & 0x07;
+                    if (wire === 2) {
+                        const len = buf[pos++];
+                        if (field === 2 && !periodStart) periodStart = ge_wuParseProtobufTimestamp(buf, pos, len);
+                        else if (field === 3 && !periodEnd) periodEnd = ge_wuParseProtobufTimestamp(buf, pos, len);
+                        pos += len;
+                    } else if (wire === 0) {
+                        pos = ge_wuDecodeVarint(buf, pos).next;
+                    } else break;
+                }
+                if (periodStart || periodEnd) break;
+            }
+        }
+        if (usagePercent === null && !productUsage.length) {
+            if (periodStart || periodEnd) return { usagePercent: 0, productUsage: [], periodStart, periodEnd };
+            return null;
+        }
+        return { usagePercent: usagePercent ?? 0, productUsage, periodStart, periodEnd };
+    }
+
+    function ge_wuShortReset(iso) {
+        if (!iso) return '';
+        const d = new Date(iso);
+        if (Number.isNaN(d.getTime())) return '';
+        return d.toLocaleString(undefined, { month: 'short', day: 'numeric' });
+    }
+
+    function ge_wuTooltip(cache) {
+        if (!cache) return 'Weekly SuperGrok usage';
+        const parts = [`${cache.usagePercent}% used`];
+        if (cache.periodEnd) {
+            const d = new Date(cache.periodEnd);
+            if (!Number.isNaN(d.getTime())) {
+                parts.push('Resets ' + d.toLocaleString(undefined, {
+                    month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'
+                }));
+            }
+        }
+        const prods = (cache.productUsage || [])
+            .filter(p => (p.usagePercent || 0) > 0)
+            .sort((a, b) => (b.usagePercent || 0) - (a.usagePercent || 0));
+        if (prods.length) {
+            parts.push(prods.map(p =>
+                `${GE_WU_PRODUCT_NAMES[p.product] || 'P' + p.product} ${p.usagePercent}%`
+            ).join(' · '));
+        }
+        parts.push('Click to refresh');
+        return parts.join(' · ');
+    }
+
+    function ge_wuInjectCSS() {
+        if (document.getElementById(GE_WU_CSS_ID)) return;
+        const s = document.createElement('style');
+        s.id = GE_WU_CSS_ID;
+        s.textContent = `
+            #${GE_WU_ID} {
+                position: fixed;
+                z-index: 9990;
+                display: none;
+                box-sizing: border-box;
+                align-items: center;
+                gap: 8px;
+                height: 18px;
+                max-width: min(520px, calc(100vw - 24px));
+                padding: 0 2px;
+                margin: 0;
+                border: none;
+                background: transparent;
+                color: inherit;
+                font: 11px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                opacity: 0.72;
+                cursor: pointer;
+                user-select: none;
+                pointer-events: auto;
+                transition: opacity 0.12s ease;
+            }
+            #${GE_WU_ID}:hover { opacity: 1; }
+            #${GE_WU_ID} .ge-wu-track {
+                flex: 1 1 auto;
+                min-width: 48px;
+                height: 3px;
+                border-radius: 99px;
+                background: color-mix(in srgb, currentColor 14%, transparent);
+                overflow: hidden;
+            }
+            #${GE_WU_ID} .ge-wu-segments {
+                display: flex;
+                width: 100%;
+                height: 100%;
+                gap: 3px;
+            }
+            #${GE_WU_ID} .ge-wu-seg {
+                flex: 0 0 auto;
+                height: 100%;
+                width: 0%;
+                transition: width 0.35s ease;
+            }
+            #${GE_WU_ID} .ge-wu-label {
+                flex: 0 0 auto;
+                font-variant-numeric: tabular-nums;
+                font-size: 10px;
+                font-weight: 500;
+                letter-spacing: 0.01em;
+                opacity: 0.75;
+                white-space: nowrap;
+            }
+            /* Mobile: short accent strip (desktop keeps full composer-aligned width). */
+            @media (max-width: 768px) {
+                #${GE_WU_ID} {
+                    max-width: min(200px, calc(100vw - 48px));
+                    gap: 6px;
+                }
+            }
+        `;
+        document.head.appendChild(s);
+    }
+
+    /** Create once on document.body — never inside React trees. */
+    function ge_wuEnsureEl() {
+        ge_wuInjectCSS();
+        let el = document.getElementById(GE_WU_ID);
+        if (el) return el;
+        if (!document.body) return null;
+        el = document.createElement('div');
+        el.id = GE_WU_ID;
+        el.setAttribute('role', 'status');
+        el.setAttribute('aria-live', 'off');
+        const track = document.createElement('div');
+        track.className = 'ge-wu-track';
+        track.setAttribute('aria-hidden', 'true');
+        const segments = document.createElement('div');
+        segments.className = 'ge-wu-segments';
+        track.appendChild(segments);
+        const label = document.createElement('span');
+        label.className = 'ge-wu-label';
+        label.textContent = '—';
+        el.appendChild(track);
+        el.appendChild(label);
+        el.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            ge_wuFetch(true);
+        });
+        document.body.appendChild(el);
+        return el;
+    }
+
+    function ge_wuHide() {
+        const el = document.getElementById(GE_WU_ID);
+        if (el) el.style.display = 'none';
+    }
+
+    // True when the composer's autocomplete/suggestion popup is on screen —
+    // it renders exactly where this strip sits, so the strip must get out of
+    // the way (and ge_wuReposition brings it back the moment it's gone).
+    function ge_wuSuggestionsOpen() {
+        try {
+            const qb = document.querySelector('.query-bar');
+            const inp = qb && (qb.querySelector('div[contenteditable="true"]') || qb.querySelector('textarea'));
+            return ge_composerSuggestionsOpen(inp || null);
+        } catch (_) {}
+        return false;
+    }
+
+    /** Watch the composer column for typeahead UL mounts (not body portals). */
+    function ge_wuBindComposerWatch() {
+        const qb = document.querySelector('.query-bar');
+        if (!qb) return;
+        const root = qb.closest('form')?.parentElement || qb.parentElement || qb;
+        if (root !== ge_wuComposerRoot) {
+            if (ge_wuComposerObs) ge_wuComposerObs.disconnect();
+            ge_wuComposerRoot = root;
+            ge_wuComposerObs = new MutationObserver(() => ge_wuScheduleReposition());
+            ge_wuComposerObs.observe(root, { childList: true, subtree: true });
+        }
+        const inp = qb.querySelector('div[contenteditable="true"], textarea');
+        if (inp && !inp._ge_wuSugBound) {
+            inp._ge_wuSugBound = true;
+            const kick = () => ge_wuReposition();
+            inp.addEventListener('input', kick);
+            inp.addEventListener('keyup', kick);
+            inp.addEventListener('focus', kick);
+        }
+    }
+
+    function ge_wuModalOpen() {
+        // Grok's dialogs (Settings etc.) are Radix/shadcn modals: they scroll-lock
+        // the body and blur the page behind them. The strip's ultra-high z-index
+        // would otherwise float on top of that overlay.
+        const body = document.body;
+        if (body.hasAttribute('data-scroll-locked')) return true;
+        if ((body.getAttribute('style') || '').includes('pointer-events: none')) return true;
+        const dlg = document.querySelector('[role="dialog"], div.fixed.inset-0[class*="backdrop"]');
+        return !!(dlg && dlg.getClientRects().length);
+    }
+
+    function ge_wuReposition() {
+        if (!featureWeeklyUsage) return;
+        if (document.visibilityState !== 'visible') return;
+        const el = document.getElementById(GE_WU_ID);
+        if (!el) return;
+        ge_wuBindComposerWatch();
+        if (!ge_wuCache) {
+            ge_wuHide();
+            return;
+        }
+        if (ge_wuModalOpen()) {
+            ge_wuHide();
+            return;
+        }
+        if (window.location.pathname.startsWith('/imagine')) {
+            ge_wuHide();
+            return;
+        }
+        // Desktop: typeahead sits on the strip — tuck it away. Mobile shows
+        // suggestions above the bar, so leave it visible there.
+        const isMobile = window.innerWidth <= 768;
+        if (ge_wuSuggestionsOpen() && !isMobile) {
+            ge_wuHide();
+            return;
+        }
+        const qb = document.querySelector('.query-bar');
+        if (!qb || !document.body.contains(qb)) {
+            ge_wuHide();
+            return;
+        }
+        const r = qb.getBoundingClientRect();
+        if (r.width < 40 || r.height < 10) {
+            ge_wuHide();
+            return;
+        }
+        // Sit just under composer; mobile uses a shorter accent strip
+        const width = isMobile ? Math.min(r.width * 0.55, 200) : Math.min(r.width, 420);
+        const left = r.left + (r.width - width) / 2;
+        const top = r.bottom + 4;
+        if (
+            Math.abs(left - ge_wuLastBox.left) < 1 &&
+            Math.abs(top - ge_wuLastBox.top) < 1 &&
+            Math.abs(width - ge_wuLastBox.width) < 1 &&
+            el.style.display === 'flex'
+        ) return;
+        ge_wuLastBox = { left, top, width };
+        el.style.display = 'flex';
+        el.style.left = Math.round(left) + 'px';
+        el.style.top = Math.round(top) + 'px';
+        el.style.width = Math.round(width) + 'px';
+    }
+
+    function ge_wuScheduleReposition() {
+        clearTimeout(ge_wuPosTimer);
+        ge_wuPosTimer = setTimeout(() => {
+            requestAnimationFrame(ge_wuReposition);
+        }, 400);
+    }
+
+    /** Build segment list: per-product slices of the track, largest first.
+        Widths are % of the full track and sum to usagePercent (as in
+        Settings → Usage). Falls back to one plain segment when the API
+        reports no per-product breakdown. */
+    function ge_wuBuildSegments(cache) {
+        const pct = cache.usagePercent;
+        const segs = (cache.productUsage || [])
+            .filter(p => (p.usagePercent || 0) > 0)
+            .sort((a, b) => (b.usagePercent || 0) - (a.usagePercent || 0))
+            .map(p => ({ product: p.product, width: p.usagePercent }));
+        if (!segs.length) {
+            return pct > 0 ? [{ product: -1, width: pct }] : [];
+        }
+        const sum = segs.reduce((n, s) => n + s.width, 0);
+        if (sum < pct) segs[0].width += pct - sum; // rounding gap → largest segment
+        return segs;
+    }
+
+    /** Patch segments + label only when values change — no innerHTML. */
+    function ge_wuApply() {
+        if (!featureWeeklyUsage) return;
+        const el = ge_wuEnsureEl();
+        if (!el) return;
+        if (!ge_wuCache) {
+            ge_wuHide();
+            return;
+        }
+        const pct = ge_wuCache.usagePercent;
+        const segs = ge_wuBuildSegments(ge_wuCache);
+        const segSig = pct + '|' + segs.map(s => s.product + ':' + s.width).join(',');
+        if (segSig !== ge_wuLastSegSig) {
+            const box = el.querySelector('.ge-wu-segments');
+            if (box) {
+                while (box.children.length > segs.length) box.lastElementChild.remove();
+                for (let i = 0; i < segs.length; i++) {
+                    let seg = box.children[i];
+                    if (!seg) {
+                        seg = document.createElement('div');
+                        seg.className = 'ge-wu-seg';
+                        box.appendChild(seg);
+                    }
+                    const alpha = GE_WU_SEG_ALPHAS[i % GE_WU_SEG_ALPHAS.length];
+                    seg.style.width = segs[i].width + '%';
+                    seg.style.background = `hsl(var(--fg-electric-blue, 221 100% 55%) / ${alpha})`;
+                    const name = GE_WU_PRODUCT_NAMES[segs[i].product];
+                    if (name) seg.title = `${name} ${segs[i].width}%`;
+                    else seg.removeAttribute('title');
+                }
+            }
+            ge_wuLastSegSig = segSig;
+        }
+        const short = ge_wuShortReset(ge_wuCache.periodEnd);
+        const label = short ? `${pct}% · ${short}` : `${pct}%`;
+        if (label !== ge_wuLastLabel) {
+            const lab = el.querySelector('.ge-wu-label');
+            if (lab) lab.textContent = label;
+            ge_wuLastLabel = label;
+        }
+        el.title = ge_wuTooltip(ge_wuCache);
+        ge_wuReposition();
+    }
+
+    function ge_wuIngestBuffer(buffer, source) {
+        const parsed = ge_wuParseCreditsConfig(buffer);
+        if (!parsed || typeof parsed.usagePercent !== 'number') return false;
+        ge_wuCache = {
+            usagePercent: Math.max(0, Math.min(100, Math.round(parsed.usagePercent))),
+            productUsage: Array.isArray(parsed.productUsage) ? parsed.productUsage : [],
+            periodEnd: parsed.periodEnd || null,
+            periodStart: parsed.periodStart || null,
+            source: source || 'api',
+            at: Date.now()
+        };
+        logDebug('[WeeklyUsage]', ge_wuCache.usagePercent + '%', source || 'api');
+        ge_wuApply();
+        return true;
+    }
+
+    async function ge_wuFetch(force) {
+        if (!featureWeeklyUsage) return null;
+        if (ge_wuFetching) return ge_wuCache;
+        if (!force && ge_wuCache && (Date.now() - ge_wuCache.at) < GE_WU_POLL_MS) {
+            ge_wuApply();
+            return ge_wuCache;
+        }
+        ge_wuFetching = true;
+        try {
+            const url = window.location.origin + '/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig';
+            const res = await _originalFetch(url, {
+                method: 'POST',
+                credentials: 'include',
+                headers: {
+                    'content-type': 'application/grpc-web+proto',
+                    'connect-protocol-version': '1',
+                    'x-grpc-web': '1'
+                },
+                body: new Uint8Array([0, 0, 0, 0, 0])
+            });
+            if (!res.ok) {
+                logDebug('[WeeklyUsage] HTTP', res.status);
+                return ge_wuCache;
+            }
+            const ok = ge_wuIngestBuffer(await res.arrayBuffer(), 'api');
+            if (!ok && !ge_wuCache) ge_wuHide();
+            return ge_wuCache;
+        } catch (e) {
+            logDebug('[WeeklyUsage] fetch failed', e?.message || e);
+            if (!ge_wuCache) ge_wuHide();
+            return ge_wuCache;
+        } finally {
+            ge_wuFetching = false;
+        }
+    }
+
+    function ge_wuScheduleSoftRefresh() {
+        if (!featureWeeklyUsage) return;
+        clearTimeout(ge_wuSoftTimer);
+        ge_wuSoftTimer = setTimeout(() => { ge_wuFetch(true); }, 5000);
+    }
+
+    function ge_wuOnVis() {
+        if (document.visibilityState === 'visible' && featureWeeklyUsage) {
+            ge_wuScheduleReposition();
+            ge_wuFetch(false);
+        }
+    }
+
+    function ge_wuStartListeners() {
+        if (ge_wuListenersOn) return;
+        ge_wuListenersOn = true;
+        window.addEventListener('resize', ge_wuScheduleReposition, { passive: true });
+        window.addEventListener('scroll', ge_wuScheduleReposition, { passive: true, capture: true });
+        document.addEventListener('visibilitychange', ge_wuOnVis);
+        // Follow the composer when it jumps (new chat → bottom): one cheap
+        // rect check 1x/sec; ge_wuReposition early-returns when nothing moved.
+        if (!ge_wuPosInterval) ge_wuPosInterval = setInterval(ge_wuReposition, 1000);
+        // Body portals (if any) + composer-column typeahead via bind.
+        if (ge_wuPopupObs) ge_wuPopupObs.disconnect();
+        ge_wuPopupObs = new MutationObserver(() => ge_wuReposition());
+        ge_wuPopupObs.observe(document.body, { childList: true });
+        // Modal open/close flips attributes on <body> (Radix scroll-lock) —
+        // body-only, attribute-filtered, so this costs nothing per page mutation.
+        if (ge_wuModalObs) ge_wuModalObs.disconnect();
+        ge_wuModalObs = new MutationObserver(() => ge_wuScheduleReposition());
+        ge_wuModalObs.observe(document.body, { attributes: true, attributeFilter: ['data-scroll-locked', 'style'] });
+        ge_wuBindComposerWatch();
+        if (!ge_wuPollTimer) {
+            ge_wuPollTimer = setInterval(() => {
+                if (!featureWeeklyUsage) return;
+                if (document.visibilityState !== 'visible') return;
+                ge_wuFetch(false);
+                ge_wuScheduleReposition();
+            }, GE_WU_POLL_MS);
+        }
+    }
+
+    function ge_wuStopListeners() {
+        if (!ge_wuListenersOn) return;
+        ge_wuListenersOn = false;
+        window.removeEventListener('resize', ge_wuScheduleReposition);
+        window.removeEventListener('scroll', ge_wuScheduleReposition, true);
+        document.removeEventListener('visibilitychange', ge_wuOnVis);
+        if (ge_wuPollTimer) { clearInterval(ge_wuPollTimer); ge_wuPollTimer = null; }
+        if (ge_wuPosInterval) { clearInterval(ge_wuPosInterval); ge_wuPosInterval = null; }
+        if (ge_wuPopupObs) { ge_wuPopupObs.disconnect(); ge_wuPopupObs = null; }
+        if (ge_wuComposerObs) { ge_wuComposerObs.disconnect(); ge_wuComposerObs = null; }
+        if (ge_wuModalObs) { ge_wuModalObs.disconnect(); ge_wuModalObs = null; }
+        ge_wuComposerRoot = null;
+        clearTimeout(ge_wuPosTimer);
+        clearTimeout(ge_wuSoftTimer);
+    }
+
+    function ge_wuRemove() {
+        ge_wuStopListeners();
+        const el = document.getElementById(GE_WU_ID);
+        if (el) el.remove();
+        ge_wuLastSegSig = '';
+        ge_wuLastLabel = '';
+        ge_wuLastBox = { left: 0, top: 0, width: 0 };
+    }
+
+    function ge_wuInit() {
+        if (!featureWeeklyUsage) { ge_wuRemove(); return; }
+        ge_wuEnsureEl();
+        ge_wuStartListeners();
+        ge_wuScheduleReposition();
+        ge_wuFetch(true);
+        // One delayed reposition after SPA settles (not on every mutation)
+        setTimeout(ge_wuScheduleReposition, 1200);
+        setTimeout(ge_wuScheduleReposition, 3000);
+    }
+
+    function ge_wuSetEnabled(on) {
+        featureWeeklyUsage = !!on;
+        setState('GrokEnhancer_WeeklyUsageBar', featureWeeklyUsage);
+        if (featureWeeklyUsage) ge_wuInit();
+        else ge_wuRemove();
     }
 
     // ══════════════════════════════════════════════════════════════
     //  6. Settings Panel UI  (Grok-themed, compact)
     // ══════════════════════════════════════════════════════════════
-    let panelStatusEl = null;
     let panelOpen = false;
+    let _ge_fabEl = null;
+    let _ge_panelEl = null;
+    let _ge_imFabEl = null;
+    let _ge_imPanelEl = null;
+    let _ge_contentObs = null;
+    let _ge_uiMountGuardStarted = false;
 
     function panelAddLog(...a) { logDebug(...a); }
 
-    function panelUpdateStatus(mr, isRecovering = false) {
-        if (!panelStatusEl) return;
-        let text = '', color = DEMOD_CONFIG.statusColors.safe;
-        if (isRecovering)                         { text = 'Recovering...';               color = DEMOD_CONFIG.statusColors.recovering; }
-        else if (mr === ModerationResult.BLOCKED)  { text = 'Blocked (Recovered/Cleared)'; color = DEMOD_CONFIG.statusColors.blocked; }
-        else if (mr === ModerationResult.FLAGGED)  { text = 'Flagged (Cleared)';            color = DEMOD_CONFIG.statusColors.flagged; }
-        else                                       { text = 'Safe';                          color = DEMOD_CONFIG.statusColors.safe; }
-        panelStatusEl.textContent = text;
-        panelStatusEl.style.color = color;
+    /** Re-inject CSS + re-append FAB/panel if SPA detached them. */
+    function ge_ensureUiMounted() {
+        if (!document.body) return;
+        injectPanelCSS();
+        if (_ge_fabEl) {
+            let remounted = false;
+            // SPA sometimes leaves the node connected but orphaned under a
+            // replaced subtree, or with display:none after a layout thrash.
+            if (!_ge_fabEl.isConnected || _ge_fabEl.parentElement !== document.body) {
+                document.body.appendChild(_ge_fabEl);
+                remounted = true;
+            }
+            if (_ge_fabHidden) {
+                if (_ge_fabEl.style.display !== 'none') _ge_fabEl.style.display = 'none';
+            } else {
+                if (_ge_fabEl.style.display === 'none') _ge_fabEl.style.display = '';
+                // Connected but not painted (zero rect) — re-append to body end
+                // so mobile overlays don't leave it stuck under replaced trees.
+                try {
+                    if (_ge_fabEl.isConnected && !_ge_fabEl.getClientRects().length) {
+                        document.body.appendChild(_ge_fabEl);
+                        remounted = true;
+                    }
+                } catch (_) {}
+            }
+            if (remounted) logDebug('[FAB] Re-mounted after DOM detach');
+        }
+        if (_ge_panelEl && (!_ge_panelEl.isConnected || _ge_panelEl.parentElement !== document.body)) {
+            document.body.appendChild(_ge_panelEl);
+            logDebug('[Panel] Re-mounted after DOM detach');
+        }
+        if (featureImagineMenu && (_ge_imFabEl || _ge_imPanelEl)) {
+            if (_ge_imFabEl && (!_ge_imFabEl.isConnected || _ge_imFabEl.parentElement !== document.body)) {
+                document.body.appendChild(_ge_imFabEl);
+                logDebug('[IM FAB] Re-mounted after DOM detach');
+            }
+            if (_ge_imPanelEl && (!_ge_imPanelEl.isConnected || _ge_imPanelEl.parentElement !== document.body)) {
+                document.body.appendChild(_ge_imPanelEl);
+            }
+        }
+        if (featureRateLimit && typeof rl_isImagine === 'function' && !rl_isImagine()) {
+            const qb = document.querySelector(RL_QBAR_SEL);
+            const badge = document.getElementById(RL_CONTAINER_ID);
+            if (qb && (!badge || !badge.isConnected) && typeof rl_fetchAndUpdate === 'function') {
+                rl_lastQueryBar = qb;
+                rl_fetchAndUpdate(qb, true);
+            }
+        }
+    }
+
+    function ge_startUiMountGuard() {
+        if (_ge_uiMountGuardStarted) return;
+        _ge_uiMountGuardStarted = true;
+        new MutationObserver(() => {
+            if (!document.body) return;
+            ge_ensureUiMounted();
+            if (_ge_contentObs && document.body) {
+                try { _ge_contentObs.observe(document.body, { childList: true, subtree: true }); } catch (_) {}
+            }
+        }).observe(document.documentElement, { childList: true });
+        setInterval(() => {
+            if (!_ge_fabEl) return;
+            // Also recover when connected but incorrectly hidden or zero-size
+            // (common on mobile after composer/keyboard layout churn).
+            const fabMissing = !_ge_fabEl.isConnected
+                || _ge_fabEl.parentElement !== document.body
+                || (!_ge_fabHidden && _ge_fabEl.style.display === 'none')
+                || (!_ge_fabHidden && _ge_fabEl.isConnected && !_ge_fabEl.getClientRects().length);
+            if (fabMissing) ge_ensureUiMounted();
+            else if (_ge_panelEl && (!_ge_panelEl.isConnected || _ge_panelEl.parentElement !== document.body)) ge_ensureUiMounted();
+            else if (featureImagineMenu && _ge_imFabEl && (!_ge_imFabEl.isConnected || _ge_imFabEl.parentElement !== document.body)) ge_ensureUiMounted();
+        }, 1500);
     }
 
     function injectPanelCSS() {
@@ -2598,12 +3265,15 @@
         style.textContent = `
             @keyframes ge-spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
             #ge-fab {
-                position: fixed; bottom: 12px; right: 12px; z-index: 10001;
+                position: fixed; bottom: 12px; right: 12px; z-index: 2147483000;
                 width: 40px; height: 40px; border-radius: 50%; border: none; cursor: pointer;
                 color: #999; background: #111;
                 display: flex; align-items: center; justify-content: center; padding: 0;
                 box-shadow: 0 1px 4px rgba(0,0,0,0.5);
                 transition: box-shadow 0.15s ease, background 0.15s ease, color 0.15s ease;
+                pointer-events: auto;
+                -webkit-tap-highlight-color: transparent;
+                touch-action: manipulation;
             }
             #ge-fab:hover {
                 background: #222; color: #ccc;
@@ -2617,18 +3287,22 @@
             }
 
             #ge-panel {
-                position: fixed; bottom: 52px; right: 12px; z-index: 10000;
+                position: fixed; bottom: 52px; right: 12px; z-index: 2147482999;
                 background: #141414; border: 1px solid #2a2a2a; border-radius: 10px;
                 box-shadow: 0 4px 16px rgba(0,0,0,0.6);
                 display: none; flex-direction: column; gap: 0;
                 font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-                color: #ccc; width: 210px; overflow: hidden;
+                color: #ccc; width: 248px; max-height: min(80vh, 640px); overflow: hidden;
+                pointer-events: auto;
             }
             #ge-panel.open { display: flex; }
+            #ge-panel .ge-panel-scroll {
+                overflow-y: auto; max-height: min(70vh, 560px); display: flex; flex-direction: column;
+            }
 
             #ge-panel .ge-header {
-                padding: 8px 12px; font-size: 11px; font-weight: 700; color: #fff;
-                border-bottom: 1px solid #222; letter-spacing: 0.5px; text-transform: uppercase;
+                padding: 4px 12px 2px; font-size: 11px; font-weight: 700; color: #fff;
+                letter-spacing: 0.5px; text-transform: uppercase;
                 text-align: center;
             }
             #ge-panel .ge-section {
@@ -2662,13 +3336,6 @@
                 transform: translateX(14px); background: #fff;
             }
 
-            #ge-panel .ge-divider { height: 1px; background: #222; margin: 0; }
-
-            #ge-panel .ge-status {
-                padding: 4px 12px; font-size: 10px; color: #888; border-top: 1px solid #222;
-            }
-            #ge-panel .ge-status span { font-weight: 600; }
-
             /* Visited link styling for clickable links */
             a.ge-link { color: #4a9eff !important; }
             a.ge-link:visited { color: #9b59b6 !important; }
@@ -2687,11 +3354,26 @@
             #ge-panel .ge-dropdown.open { display: flex; }
             #ge-panel .ge-dropdown .ge-row { padding: 0; }
 
-            /* Mobile: raise the FAB above Grok's send button (tune this
-               offset if a given phone's composer height differs). */
+            /* Mobile: raise the FAB above Grok's send button + home indicator.
+               Larger hit target; ultra-high z-index so SPA layers can't bury it. */
             @media (max-width: 768px) {
-                #ge-fab { bottom: 80px; }
-                #ge-panel { bottom: 120px; }
+                #ge-fab {
+                    bottom: calc(80px + env(safe-area-inset-bottom, 0px));
+                    right: calc(12px + env(safe-area-inset-right, 0px));
+                    width: 44px;
+                    height: 44px;
+                    z-index: 2147483000;
+                    pointer-events: auto !important;
+                    visibility: visible;
+                    opacity: 1;
+                }
+                #ge-panel {
+                    bottom: calc(120px + env(safe-area-inset-bottom, 0px));
+                    right: calc(12px + env(safe-area-inset-right, 0px));
+                    z-index: 2147482999;
+                    max-width: calc(100vw - 24px);
+                    max-height: min(70vh, 560px);
+                }
                 .ge-hotkey-row { display: none; }
             }
         `;
@@ -2701,6 +3383,8 @@
     function createToggle(label, checked, onChange) {
         const row = document.createElement('div');
         row.className = 'ge-row';
+        row.setAttribute('data-ge-search', (label || '').toLowerCase());
+        row.setAttribute('data-ge-toggle-label', label || '');
         const lbl = document.createElement('span');
         lbl.className = 'ge-label';
         lbl.textContent = label;
@@ -2717,6 +3401,42 @@
         row.appendChild(lbl);
         row.appendChild(toggle);
         return { row, input };
+    }
+
+    /** Export all Grok Enhancer settings (localStorage keys). PIN is hash-only. */
+    function ge_exportAllSettings() {
+        const keys = [];
+        for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            if (!k) continue;
+            if (k.startsWith('GrokEnhancer_') || k === 'GrokDeModDebug' || k === 'grok_state') keys.push(k);
+        }
+        const data = { version: 2, exportedAt: new Date().toISOString(), settings: {} };
+        for (const k of keys.sort()) {
+            data.settings[k] = localStorage.getItem(k);
+        }
+        return data;
+    }
+
+    function ge_importAllSettings(data) {
+        if (!data || typeof data !== 'object' || !data.settings || typeof data.settings !== 'object') {
+            throw new Error('Invalid settings JSON (need { settings: { key: value } })');
+        }
+        for (const [k, v] of Object.entries(data.settings)) {
+            if (typeof k !== 'string') continue;
+            if (!(k.startsWith('GrokEnhancer_') || k === 'GrokDeModDebug' || k === 'grok_state')) continue;
+            if (v == null) localStorage.removeItem(k);
+            else localStorage.setItem(k, String(v));
+        }
+    }
+
+    function ge_downloadJson(obj, filename) {
+        const blob = new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = filename;
+        document.body.appendChild(a); a.click();
+        setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
     }
 
     function createModelDropdown() {
@@ -2793,6 +3513,8 @@
         const wrapper = document.createElement('div');
         wrapper.style.display = 'flex';
         wrapper.style.flexDirection = 'column';
+        wrapper.className = 'ge-section-wrap';
+        wrapper.setAttribute('data-ge-search', (title || '').toLowerCase());
 
         const header = document.createElement('div');
         header.className = 'ge-row';
@@ -2840,14 +3562,20 @@
           onToggle: (on) => { featureLogo = on; if (!on) logoReplaced = false; else { logoReplaced = false; tryReplaceLogo(); } } },
         { label: 'Clickable Links', get: () => featureLinks, stateKey: 'GrokEnhancer_Links',
           onToggle: (on) => { featureLinks = on; } },
-        { label: 'DeMod', get: () => featureDeMod, stateKey: 'GrokDeModEnabled',
-          onToggle: (on) => { featureDeMod = on; } },
         { label: 'Hide Share Button', get: () => featureHideShare, stateKey: 'GrokEnhancer_HideShare',
           onToggle: (on) => { featureHideShare = on; applyShareHide(on); } },
         { label: 'Hide Popups', get: () => featureHidePopups, stateKey: 'GrokEnhancer_HidePopups',
           onToggle: (on) => { featureHidePopups = on; ge_applyPopupHideCSS(on); } },
         { label: 'Hide Premium Upsells', get: () => featureHidePremium, stateKey: 'GrokEnhancer_HidePremium',
           onToggle: (on) => { featureHidePremium = on; ge_applyPremiumHideCSS(on); if (on) ge_dismissPremium(); } },
+        { label: 'Hide Composer Suggestions', get: () => featureHideComposerSuggestions, stateKey: 'GrokEnhancer_HideComposerSuggestions',
+          onToggle: (on) => { featureHideComposerSuggestions = on; ge_applyComposerSuggestionsHideCSS(on); } },
+        { label: 'Hide Private Chat Notice', get: () => featureHidePrivateNotice, stateKey: 'GrokEnhancer_HidePrivateNotice',
+          onToggle: (on) => { featureHidePrivateNotice = on; ge_applyPrivateNoticeHideCSS(on); } },
+        { label: 'Hide Dictation Button', get: () => featureHideDictation, stateKey: 'GrokEnhancer_HideDictation',
+          onToggle: (on) => { featureHideDictation = on; ge_applyDictationHideCSS(on); } },
+        { label: 'Hide Voice Mode Button', get: () => featureHideVoiceMode, stateKey: 'GrokEnhancer_HideVoiceMode',
+          onToggle: (on) => { featureHideVoiceMode = on; ge_applyVoiceModeHideCSS(on); } },
         { label: 'Auto Private Chat', get: () => featureAutoPrivate, stateKey: 'GrokEnhancer_AutoPrivate',
           onToggle: (on) => { featureAutoPrivate = on; if (on) ge_autoEnablePrivateMode(); }, noLog: true },
         { label: 'Disable Auto Scroll', get: () => featureDisableAutoScroll, stateKey: 'GrokEnhancer_DisableAutoScroll',
@@ -2866,6 +3594,8 @@
     }
 
     function setupPanel() {
+        if (_ge_fabEl) { ge_ensureUiMounted(); return; }
+        if (!document.body) { logError('[FAB] setupPanel before document.body'); return; }
         injectPanelCSS();
 
         // FAB button — no rotation, just subtle gray shadow on hover
@@ -2875,6 +3605,8 @@
         fab.title = 'Grok Enhancer Settings';
         const panel = document.createElement('div');
         panel.id = 'ge-panel';
+        _ge_fabEl = fab;
+        _ge_panelEl = panel;
 
         // ── Triple-click to hide FAB ─────────────────────────────
         function _ge_handleFabTripleClick() {
@@ -2942,6 +3674,7 @@
         if (_ge_fabHidden) fab.style.display = 'none';
 
         document.body.appendChild(fab);
+        ge_startUiMountGuard();
 
         // Header
         const header = document.createElement('div');
@@ -2949,13 +3682,32 @@
         header.innerHTML = '<span style="color:#555;font-size:14px">★</span>  Grok Enhancer  <span style="color:#555;font-size:14px">★</span>';
         panel.appendChild(header);
 
+        // Credit — small, matches panel look, directly under the header
+        const credit = document.createElement('div');
+        credit.style.cssText = 'text-align:center;padding:1px 0 6px;font-size:10px;color:#555;border-bottom:1px solid #222;';
+        const creditLink = document.createElement('a');
+        creditLink.href = 'https://angelmakes.software/';
+        creditLink.target = '_blank';
+        creditLink.rel = 'noopener';
+        creditLink.textContent = 'Made with 🖤 by Angel';
+        creditLink.style.cssText = 'color:inherit;text-decoration:none;';
+        creditLink.addEventListener('mouseenter', () => { creditLink.style.color = '#999'; });
+        creditLink.addEventListener('mouseleave', () => { creditLink.style.color = ''; });
+        credit.appendChild(creditLink);
+        panel.appendChild(credit);
+
+        // Scrollable body for toggles
+        const scroll = document.createElement('div');
+        scroll.className = 'ge-panel-scroll';
+
         // Feature toggles section
         const section = document.createElement('div');
         section.className = 'ge-section';
 
-        // ── Core (always visible) ──
-        section.appendChild(ge_buildSimpleToggleRow('SuperGrok Logo'));
-        section.appendChild(createToggle('Imagine Menu', featureImagineMenu, (on) => {
+        // ── Featured (collapsible) ──
+        const logoRow = ge_buildSimpleToggleRow('SuperGrok Logo');
+
+        const imagToggle = createToggle('Imagine Menu', featureImagineMenu, (on) => {
             featureImagineMenu = on; setState('GrokEnhancer_ImagineMenu', on);
             const imFab = document.getElementById('ge-im-fab');
             const imPanel = document.getElementById('ge-im-panel');
@@ -2967,13 +3719,39 @@
                 if (imPanel) imPanel.classList.remove('open');
             }
             panelAddLog(`Imagine Menu ${on ? 'ON' : 'OFF'}`);
-        }).row);
-        section.appendChild(ge_buildSimpleToggleRow('DeMod'));
-        section.appendChild(createToggle('Rate Limit', featureRateLimit, (on) => {
+        });
+
+        const rlToggle = createToggle('Message Rate Limits', featureRateLimit, (on) => {
             featureRateLimit = on; setState('GrokEnhancer_RateLimit', on);
             if (!on) rl_removeExisting(); else if (rl_lastQueryBar) rl_fetchAndUpdate(rl_lastQueryBar, true);
-            panelAddLog(`Rate Limit ${on ? 'ON' : 'OFF'}`);
-        }).row);
+            panelAddLog(`Message Rate Limits ${on ? 'ON' : 'OFF'}`);
+        });
+
+        const wuToggle = createToggle('Weekly Usage Bar', featureWeeklyUsage, (on) => {
+            ge_wuSetEnabled(on);
+            panelAddLog(`Weekly Usage Bar ${on ? 'ON' : 'OFF'}`);
+        });
+
+        section.appendChild(createSection('Featured', [
+            logoRow,
+            imagToggle.row,
+            rlToggle.row,
+            wuToggle.row,
+        ]));
+
+        // Prompt Library shortcut (appended below the Other section, bottom of panel)
+        const promptsRow = document.createElement('div');
+        promptsRow.className = 'ge-row';
+        promptsRow.setAttribute('data-ge-search', 'prompt library prompts');
+        const promptsLbl = document.createElement('span');
+        promptsLbl.className = 'ge-label';
+        promptsLbl.textContent = 'Prompt Library';
+        const promptsBtn = document.createElement('button');
+        promptsBtn.textContent = 'Open';
+        promptsBtn.style.cssText = 'background:#333;color:#aaa;border:none;border-radius:4px;padding:2px 10px;font-size:11px;cursor:pointer;';
+        promptsBtn.addEventListener('click', () => ge_openPromptManager());
+        promptsRow.appendChild(promptsLbl);
+        promptsRow.appendChild(promptsBtn);
 
         // ── UI Cleanup ──
         const followupsRow = createToggle('Hide Follow-up Prompts', featureHideFollowups, (on) => {
@@ -2987,10 +3765,11 @@
             panelAddLog(`Hide Follow-up Prompts ${on ? 'ON' : 'OFF'}`);
         }).row;
         const navHideRows = GE_SIDEBAR_NAV_HIDE_ITEMS.map(item => {
-            const stateKey = { build: 'GrokEnhancer_HideBuildNav', imagine: 'GrokEnhancer_HideImagineNav', skills: 'GrokEnhancer_HideSkillsNav' }[item.key];
+            const stateKey = { build: 'GrokEnhancer_HideBuildNav', imagine: 'GrokEnhancer_HideImagineNav', skills: 'GrokEnhancer_HideSkillsNav', automations: 'GrokEnhancer_HideAutomationsNav' }[item.key];
             return createToggle(`Hide ${item.label}`, item.get(), (on) => {
                 if (item.key === 'build') featureHideBuildNav = on;
                 else if (item.key === 'imagine') featureHideImagineNav = on;
+                else if (item.key === 'automations') featureHideAutomationsNav = on;
                 else featureHideSkillsNav = on;
                 setState(stateKey, on);
                 ge_scanSidebarNavHide();
@@ -3001,6 +3780,10 @@
             ge_buildSimpleToggleRow('Hide Share Button'),
             ge_buildSimpleToggleRow('Hide Popups'),
             ge_buildSimpleToggleRow('Hide Premium Upsells'),
+            ge_buildSimpleToggleRow('Hide Composer Suggestions'),
+            ge_buildSimpleToggleRow('Hide Private Chat Notice'),
+            ge_buildSimpleToggleRow('Hide Dictation Button'),
+            ge_buildSimpleToggleRow('Hide Voice Mode Button'),
             followupsRow,
             createModelDropdown(),
             ...navHideRows,
@@ -3172,6 +3955,50 @@
         stylesBtn.appendChild(stylesLabel);
         stylesBtn.appendChild(stylesOpenBtn);
 
+        const exportSettingsRow = document.createElement('div');
+        exportSettingsRow.className = 'ge-row';
+        const exportSettingsLabel = document.createElement('span');
+        exportSettingsLabel.className = 'ge-label';
+        exportSettingsLabel.textContent = 'Export Settings';
+        const exportSettingsBtn = document.createElement('button');
+        exportSettingsBtn.textContent = 'Export';
+        exportSettingsBtn.style.cssText = 'background:#333;color:#aaa;border:none;border-radius:4px;padding:2px 10px;font-size:11px;cursor:pointer;';
+        exportSettingsBtn.addEventListener('click', () => {
+            ge_downloadJson(ge_exportAllSettings(), `grok_enhancer_settings_${Date.now()}.json`);
+            panelAddLog('Settings exported');
+        });
+        exportSettingsRow.appendChild(exportSettingsLabel);
+        exportSettingsRow.appendChild(exportSettingsBtn);
+
+        const importSettingsRow = document.createElement('div');
+        importSettingsRow.className = 'ge-row';
+        const importSettingsLabel = document.createElement('span');
+        importSettingsLabel.className = 'ge-label';
+        importSettingsLabel.textContent = 'Import Settings';
+        const importSettingsBtn = document.createElement('button');
+        importSettingsBtn.textContent = 'Import';
+        importSettingsBtn.style.cssText = 'background:#333;color:#aaa;border:none;border-radius:4px;padding:2px 10px;font-size:11px;cursor:pointer;';
+        importSettingsBtn.addEventListener('click', () => {
+            const inp = document.createElement('input');
+            inp.type = 'file';
+            inp.accept = 'application/json,.json';
+            inp.addEventListener('change', async () => {
+                const file = inp.files && inp.files[0];
+                if (!file) return;
+                try {
+                    const data = JSON.parse(await file.text());
+                    ge_importAllSettings(data);
+                    alert('Settings imported. Reload the page to apply all values.');
+                    panelAddLog('Settings imported — reload recommended');
+                } catch (e) {
+                    alert('Import failed: ' + (e.message || e));
+                }
+            });
+            inp.click();
+        });
+        importSettingsRow.appendChild(importSettingsLabel);
+        importSettingsRow.appendChild(importSettingsBtn);
+
         section.appendChild(createSection('Other', [
             ge_buildSimpleToggleRow('Clickable Links'),
             createToggle('Hidden Menu Survives Refresh', featureFabStayHidden, (on) => {
@@ -3183,26 +4010,14 @@
             ge_buildSimpleToggleRow('Disable Auto Scroll'),
             ge_buildSimpleToggleRow('Debug'),
             stylesBtn,
+            exportSettingsRow,
+            importSettingsRow,
         ]));
+        // Prompt Library shortcut — standalone row below the Other section
+        section.appendChild(promptsRow);
 
-        panel.appendChild(section);
-
-        // Divider
-        const div1 = document.createElement('div');
-        div1.className = 'ge-divider';
-        panel.appendChild(div1);
-
-        // Status row
-        const statusRow = document.createElement('div');
-        statusRow.className = 'ge-status';
-        const statusLabel = document.createTextNode('DeMod: ');
-        const statusSpan = document.createElement('span');
-        statusSpan.textContent = 'Safe';
-        statusSpan.style.color = DEMOD_CONFIG.statusColors.safe;
-        statusRow.appendChild(statusLabel);
-        statusRow.appendChild(statusSpan);
-        panel.appendChild(statusRow);
-        panelStatusEl = statusSpan;
+        scroll.appendChild(section);
+        panel.appendChild(scroll);
 
         document.body.appendChild(panel);
     }
@@ -3224,65 +4039,89 @@
 
     // Content observer — only triggers menu-related work when menus are detected
     let _ge_popupTimer = null;
+    let _ge_contentThrottleTimer = null;
+    let _ge_contentPendingNodes = [];
+    let _ge_contentHadAdds = false;
 
     function startContentObserver() {
+        if (_ge_contentObs) _ge_contentObs.disconnect();
         const obs = new MutationObserver((mutations) => {
-            if (!logoReplaced && featureLogo) tryReplaceLogo();
-
-            let menuDetected = false;
-            const privacyNodes = featurePrivacyMode ? [] : null;
+            if ((_ge_fabEl && !_ge_fabEl.isConnected) || (_ge_panelEl && !_ge_panelEl.isConnected)) {
+                ge_ensureUiMounted();
+            }
             for (const m of mutations) {
                 for (const added of m.addedNodes) {
                     if (added.nodeType !== Node.ELEMENT_NODE) continue;
                     if (featureLinks) _scheduleProcess(added);
-                    if (!menuDetected && (added.matches?.('[role="menu"]') || added.querySelector?.('[role="menu"]'))) menuDetected = true;
-                    if (privacyNodes) privacyNodes.push(added);
+                    _ge_contentPendingNodes.push(added);
+                    _ge_contentHadAdds = true;
                 }
             }
-
-            if (menuDetected && (featureHideHeavy || featureHideExpert || featureHideAuto)) { ge_markModelItems(); ge_markUpgradeHeavyBtns(); }
-            if (featureHidePremium) ge_dismissPremium();
-
-            // Mark "Upgrade to Heavy" buttons on any mutation
-            if (featureHideHeavy) ge_markUpgradeHeavyBtns();
-
-            // Hide follow-up prompt containers when they appear
-            if (featureHideFollowups) ge_markFollowupContainers();
-
-            // Hide sidebar nav items (Build / Imagine / Skills and Connectors)
-            if (featureHideBuildNav || featureHideImagineNav || featureHideSkillsNav) ge_scanSidebarNavHide();
-
-            // Privacy mode: scan only newly-added nodes, not the whole document
-            if (featurePrivacyMode && privacyNodes.length) ge_scanPrivacySensitive(privacyNodes);
-
-            // Debounce popup dismissal (less urgent, 500ms)
-            if ((featureHidePopups || featureHidePremium) && !_ge_popupTimer) {
-                _ge_popupTimer = setTimeout(() => {
-                    _ge_popupTimer = null;
-                    ge_dismissPopups();
-                    ge_dismissPremium();
-                }, 500);
-            }
-
-            // Auto-enable private mode
-            if (featureAutoPrivate && !_ge_privateTimer) {
-                _ge_privateTimer = setTimeout(() => {
-                    _ge_privateTimer = null;
-                    ge_autoEnablePrivateMode();
-                }, 1000);
-            }
-
-            // Downloader: scan for new media and inject mass download button
-            ge_scanForDownloadableMedia();
-            ge_injectMassDownloadBtn();
-
-            // Imagine Menu: moderation detection + video loop enforcement
-            ge_checkModeration();
-            ge_enforceVideoLoop();
+            // Trailing-edge throttle: collapse mutation bursts (streaming, SPA
+            // re-renders) into one scan pass instead of scanning per batch.
+            if (_ge_contentThrottleTimer) return;
+            _ge_contentThrottleTimer = setTimeout(() => {
+                _ge_contentThrottleTimer = null;
+                const nodes = _ge_contentPendingNodes;
+                const hadAdds = _ge_contentHadAdds;
+                _ge_contentPendingNodes = [];
+                _ge_contentHadAdds = false;
+                ge_runContentScan(nodes, hadAdds);
+            }, 250);
         });
-        obs.observe(document.body, { childList: true, subtree: true });
+        _ge_contentObs = obs;
+        if (document.body) obs.observe(document.body, { childList: true, subtree: true });
         if (featureLogo) tryReplaceLogo();
-        if (featureLinks) _scheduleProcess(document.body);
+        if (featureLinks && document.body) _scheduleProcess(document.body);
+    }
+
+    function ge_runContentScan(addedNodes, hadAdds) {
+        let menuDetected = false;
+        const privacyNodes = featurePrivacyMode ? [] : null;
+        for (const added of addedNodes) {
+            if (!menuDetected && (added.matches?.('[role="menu"]') || added.querySelector?.('[role="menu"]'))) menuDetected = true;
+            if (privacyNodes) privacyNodes.push(added);
+        }
+
+        if (menuDetected && (featureHideHeavy || featureHideExpert || featureHideAuto)) { ge_markModelItems(); ge_markUpgradeHeavyBtns(); }
+        if (hadAdds && featureHidePremium) ge_dismissPremium();
+
+        // Mark "Upgrade to Heavy" buttons on each scan pass
+        if (featureHideHeavy) ge_markUpgradeHeavyBtns();
+
+        // Hide follow-up prompt containers when they appear
+        if (featureHideFollowups) ge_markFollowupContainers();
+
+        // Hide sidebar nav items (Build / Imagine / Skills and Connectors / Automations)
+        if (featureHideBuildNav || featureHideImagineNav || featureHideSkillsNav || featureHideAutomationsNav) ge_scanSidebarNavHide();
+
+        // Privacy mode: scan only newly-added nodes, not the whole document
+        if (featurePrivacyMode && privacyNodes.length) ge_scanPrivacySensitive(privacyNodes);
+
+        // Debounce popup dismissal (less urgent, 500ms)
+        if ((featureHidePopups || featureHidePremium) && !_ge_popupTimer) {
+            _ge_popupTimer = setTimeout(() => {
+                _ge_popupTimer = null;
+                ge_dismissPopups();
+                ge_dismissPremium();
+            }, 500);
+        }
+
+        // Auto-enable private mode
+        if (featureAutoPrivate && !_ge_privateTimer) {
+            _ge_privateTimer = setTimeout(() => {
+                _ge_privateTimer = null;
+                ge_autoEnablePrivateMode();
+            }, 1000);
+        }
+
+        // Downloader: scan for new media and inject mass download button
+        if (hadAdds) ge_scanForDownloadableMedia();
+        ge_injectMassDownloadBtn();
+
+        // Imagine Menu: moderation detection + video loop enforcement
+        ge_checkModeration();
+        ge_enforceVideoLoop();
     }
 
     // ══════════════════════════════════════════════════════════════
@@ -3355,6 +4194,79 @@
     function ge_filenameFromMedia(url, ext) {
         if (url.startsWith('data:')) return `grok_${Date.now()}.${ext}`;
         return url.split('/').pop().split('?')[0] || `grok_${Date.now()}.${ext}`;
+    }
+
+    /** Filename from template tokens: {date} {id} {type} {prompt} */
+    function ge_applyFilenameTemplate(item) {
+        const ext = item.ext || (item.type === 'video' ? 'mp4' : 'jpg');
+        const id = item.id || ge_extractPostId(item.url) || 'media';
+        const type = item.type || 'image';
+        let date = (item.createTime || '').toString().slice(0, 19).replace(/:/g, '-');
+        if (!date) date = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
+        const prompt = ge_sanitizeFilename((item.prompt || '').toString().slice(0, 80)) || 'noprompt';
+        let name = (ge_dlFilenameTemplate || '{date}_{id}_{type}')
+            .replace(/\{date\}/gi, date)
+            .replace(/\{id\}/gi, id)
+            .replace(/\{type\}/gi, type)
+            .replace(/\{prompt\}/gi, prompt);
+        name = ge_sanitizeFilename(name) || `grok_${Date.now()}`;
+        if (!/\.[a-z0-9]{2,5}$/i.test(name)) name += '.' + ext;
+        return name;
+    }
+
+    function ge_resolveDownloadName(item) {
+        if (item && (item.prompt != null || item.createTime != null || item.id || item.type)) {
+            return ge_applyFilenameTemplate(item);
+        }
+        if (item && item.name) return item.name;
+        return ge_filenameFromMedia(item?.url || '', item?.ext || 'jpg');
+    }
+
+    /** Simple sequential/concurrent download queue with optional progress UI. */
+    async function ge_runDownloadQueue(items, opts) {
+        const list = (items || []).filter(i => i && i.url);
+        const concurrent = Math.max(1, Math.min(10, (opts && opts.concurrent) || 1));
+        const onProgress = opts && opts.onProgress;
+        const cancelled = opts && opts.cancelledRef ? opts.cancelledRef : { value: false };
+        let done = 0, failed = 0;
+        const total = list.length;
+        const queue = [...list];
+        const workers = [];
+        for (let w = 0; w < concurrent; w++) {
+            workers.push((async () => {
+                while (queue.length && !cancelled.value) {
+                    const item = queue.shift();
+                    if (!item) break;
+                    const fname = ge_resolveDownloadName(item);
+                    const ok = await ge_downloadBlob(item.url, fname);
+                    if (!ok) failed++;
+                    done++;
+                    if (onProgress) onProgress({ done, failed, total, item, ok });
+                }
+            })());
+        }
+        await Promise.all(workers);
+        return { done, failed, total, cancelled: !!cancelled.value };
+    }
+
+    function ge_ensureDlProgressUi() {
+        let el = document.getElementById('ge-dl-progress');
+        if (el) return el;
+        el = document.createElement('div');
+        el.id = 'ge-dl-progress';
+        el.style.cssText = 'position:fixed;bottom:72px;left:50%;transform:translateX(-50%);z-index:100050;background:#1a1a1a;border:1px solid #333;border-radius:10px;padding:10px 14px;color:#ccc;font-size:12px;box-shadow:0 4px 16px rgba(0,0,0,0.5);display:none;min-width:220px;text-align:center;';
+        document.body.appendChild(el);
+        return el;
+    }
+
+    function ge_showDlProgress(done, total, failed) {
+        const el = ge_ensureDlProgressUi();
+        el.style.display = 'block';
+        el.textContent = `Downloading ${done}/${total}` + (failed ? ` · ${failed} failed` : '');
+        if (done >= total) {
+            el.textContent = `Done ${done}/${total}` + (failed ? ` · ${failed} failed` : '');
+            setTimeout(() => { if (el.textContent.startsWith('Done')) el.style.display = 'none'; }, 2500);
+        }
     }
 
     // Reliable download — uses GM_xmlhttpRequest for CORS-free downloading,
@@ -3457,12 +4369,14 @@
             if (apiEntry && apiEntry.items.length > 0) {
                 // Download only the single item matching this card's post ID
                 const match = apiEntry.items.find(i => i.id === pid) || apiEntry.items[0];
-                await ge_downloadBlob(match.url, match.name);
+                await ge_downloadBlob(match.url, ge_resolveDownloadName(match));
             } else {
                 // Fallback: download single visible media from DOM
                 const directMedia = ge_getMediaSrc(card);
                 if (directMedia) {
-                    const fname = ge_filenameFromMedia(directMedia.url, directMedia.ext);
+                    const fname = ge_resolveDownloadName({
+                        url: directMedia.url, type: directMedia.type, ext: directMedia.ext, id: pid
+                    });
                     await ge_downloadBlob(directMedia.url, fname);
                 }
             }
@@ -3579,10 +4493,13 @@
             const media = collectDetailMedia();
             if (media.length === 0) { logDebug('[Downloader] No media found on detail page'); return; }
             btn.style.opacity = '0.5'; btn.style.pointerEvents = 'none';
-            for (const m of media) {
-                const fname = m.name || ge_filenameFromMedia(m.url, m.ext);
-                await ge_downloadBlob(m.url, fname);
-            }
+            await ge_runDownloadQueue(media.map(m => ({
+                url: m.url, type: m.type, ext: m.ext, name: m.name,
+                id: m.id || ge_extractPostId(m.url), prompt: m.prompt, createTime: m.createTime
+            })), {
+                concurrent: 1,
+                onProgress: ({ done, total, failed }) => ge_showDlProgress(done, total, failed)
+            });
             btn.style.opacity = ''; btn.style.pointerEvents = '';
         });
         const moreOptGroup = topBar.querySelector('.flex.flex-row.gap-2');
@@ -3733,6 +4650,24 @@
         typeRow.appendChild(chkVariants.wrap);
         opts.appendChild(typeRow);
 
+        // Filename template
+        const tmplRow = document.createElement('div');
+        tmplRow.style.cssText = 'display:flex;flex-direction:column;gap:4px;';
+        const tmplLabel = document.createElement('span');
+        tmplLabel.textContent = 'Filename template: {date} {id} {type} {prompt}';
+        tmplLabel.style.cssText = 'font-size:11px;color:#888;';
+        const tmplInput = document.createElement('input');
+        tmplInput.type = 'text';
+        tmplInput.value = ge_dlFilenameTemplate;
+        tmplInput.style.cssText = 'background:#111;border:1px solid #333;border-radius:6px;padding:6px 8px;color:#ddd;font-size:12px;width:100%;font-family:monospace;';
+        tmplInput.addEventListener('change', () => {
+            ge_dlFilenameTemplate = tmplInput.value.trim() || '{date}_{id}_{type}';
+            setState('GrokEnhancer_DL_FilenameTemplate', ge_dlFilenameTemplate);
+        });
+        tmplRow.appendChild(tmplLabel);
+        tmplRow.appendChild(tmplInput);
+        opts.appendChild(tmplRow);
+
         dlg.appendChild(opts);
 
         // Progress bar area (hidden initially)
@@ -3765,36 +4700,31 @@
 
         async function runDownload(items) {
             _dl_cancelled = false;
+            ge_dlFilenameTemplate = tmplInput.value.trim() || '{date}_{id}_{type}';
+            setState('GrokEnhancer_DL_FilenameTemplate', ge_dlFilenameTemplate);
             const concurrent = Math.max(1, Math.min(10, parseInt(concInput.value) || 3));
             progressArea.style.display = 'block';
-            let done = 0, failed = 0;
             const total = items.length;
             progressText.textContent = `0 / ${total}`;
             progressBarInner.style.width = '0%';
 
             btnRow.querySelectorAll('button').forEach(b => b.disabled = true);
 
-            const queue = [...items];
-            const workers = [];
-            for (let i = 0; i < concurrent; i++) {
-                workers.push((async () => {
-                    while (queue.length > 0 && !_dl_cancelled) {
-                        const item = queue.shift();
-                        if (!item) break;
-                        const ok = await ge_downloadBlob(item.url, item.name);
-                        if (!ok) failed++;
-                        done++;
-                        progressText.textContent = `${done} / ${total}` + (failed ? ` (${failed} failed)` : '');
-                        progressBarInner.style.width = `${Math.round((done / total) * 100)}%`;
-                    }
-                })());
-            }
-            await Promise.all(workers);
+            const cancelledRef = { get value() { return _dl_cancelled; }, set value(v) { _dl_cancelled = v; } };
+            const result = await ge_runDownloadQueue(items, {
+                concurrent,
+                cancelledRef,
+                onProgress: ({ done, failed, total: t }) => {
+                    progressText.textContent = `${done} / ${t}` + (failed ? ` (${failed} failed)` : '');
+                    progressBarInner.style.width = `${Math.round((done / t) * 100)}%`;
+                    ge_showDlProgress(done, t, failed);
+                }
+            });
 
-            if (_dl_cancelled) {
-                progressText.textContent = `Stopped at ${done} / ${total}` + (failed ? ` (${failed} failed)` : '');
+            if (result.cancelled) {
+                progressText.textContent = `Stopped at ${result.done} / ${result.total}` + (result.failed ? ` (${result.failed} failed)` : '');
             } else {
-                progressText.textContent = `Done! ${done} / ${total}` + (failed ? ` (${failed} failed)` : '');
+                progressText.textContent = `Done! ${result.done} / ${result.total}` + (result.failed ? ` (${result.failed} failed)` : '');
             }
             btnRow.querySelectorAll('button').forEach(b => b.disabled = false);
         }
@@ -3885,12 +4815,15 @@
     const GE_MODERATION_EXACT = 'Content Moderated. Try a different idea.';
     const GE_MODERATION_PATTERNS = ['content moderated', 'try a different idea', 'moderated', 'content policy', 'cannot generate', 'unable to generate'];
 
+    /** Returns reason string if moderated, or null if clear. */
     function ge_findModerationSignal() {
         // Method 1: Detect blurred/moderated images — alt="Moderated" with blur classes
         const moderatedImgs = document.querySelectorAll('img[alt="Moderated"]');
         for (const img of moderatedImgs) {
             const cls = img.className || '';
-            if (cls.includes('blur') || cls.includes('saturate-0')) return true;
+            if (cls.includes('blur') || cls.includes('saturate-0')) {
+                return 'Moderated image (blurred)';
+            }
         }
 
         // Method 2: Detect eye-off SVG icon (lucide-eye-off) used on moderated content
@@ -3898,9 +4831,10 @@
         for (const svg of eyeOff) {
             // Only count it if it's large (size-24 = main content, not thumbnail)
             const w = parseInt(svg.getAttribute('width') || '0');
-            if (w >= 24) return true;
             const cls = svg.className?.baseVal || svg.className || '';
-            if (cls.includes('size-24')) return true;
+            if (w >= 24 || cls.includes('size-24')) {
+                return 'Moderated content (eye-off icon)';
+            }
         }
 
         // Method 3: Toast / notification text patterns
@@ -3908,8 +4842,10 @@
             || document.querySelector('section[aria-label*="Notification"]')
             || document.querySelector('[role="alert"]');
         if (toastRoot) {
-            const txt = (toastRoot.textContent || '').toLowerCase();
-            if (GE_MODERATION_PATTERNS.some(p => txt.includes(p))) return true;
+            const raw = (toastRoot.textContent || '').trim();
+            const txt = raw.toLowerCase();
+            const hit = GE_MODERATION_PATTERNS.find(p => txt.includes(p));
+            if (hit) return raw.slice(0, 120) || hit;
         }
 
         // Method 4: Exact text match in spans
@@ -3917,16 +4853,20 @@
         const spans = main.querySelectorAll('span');
         const cap = Math.min(spans.length, 600);
         for (let i = 0; i < cap; i++) {
-            if ((spans[i].textContent || '').trim() === GE_MODERATION_EXACT) return true;
+            if ((spans[i].textContent || '').trim() === GE_MODERATION_EXACT) {
+                return GE_MODERATION_EXACT;
+            }
         }
 
         // Method 5: Gray placeholder thumbnail with eye-off icon in variant strip
         const thumbContainers = document.querySelectorAll('button .bg-gray-700');
         for (const tc of thumbContainers) {
-            if (tc.querySelector('svg.lucide-eye-off, svg[class*="lucide-eye-off"]')) return true;
+            if (tc.querySelector('svg.lucide-eye-off, svg[class*="lucide-eye-off"]')) {
+                return 'Moderated thumbnail';
+            }
         }
 
-        return false;
+        return null;
     }
 
     // ── Persistent Prompt: restore prompt text when moderation clears it ──
@@ -3936,8 +4876,8 @@
     function ge_startPersistentPromptWatch() {
         if (_ge_persistentPromptTimer) return;
         _ge_persistentPromptTimer = setInterval(() => {
-            if (!ge_imPersistentPrompt || !_ge_lastPromptText) {
-                if (!ge_imPersistentPrompt) { clearInterval(_ge_persistentPromptTimer); _ge_persistentPromptTimer = null; }
+            if (!featureImagineMenu || !ge_imPersistentPrompt || !_ge_lastPromptText) {
+                if (!featureImagineMenu || !ge_imPersistentPrompt) { clearInterval(_ge_persistentPromptTimer); _ge_persistentPromptTimer = null; }
                 return;
             }
             const input = document.querySelector('textarea[aria-label="Make a video"]')
@@ -3981,17 +4921,24 @@
         const now = Date.now();
         if (now - _ge_imLastModScan < 400) return;
         _ge_imLastModScan = now;
-        if (!ge_findModerationSignal()) {
+        const modReason = ge_findModerationSignal();
+        if (!modReason) {
             // Moderation cleared (e.g. a retry succeeded) — reset so auto-retry doesn't
             // permanently stop working for the rest of the session once it hits the cap.
             // The 5s cooldown avoids resetting mid-flight, before the just-clicked retry's
             // own moderation signal has had time to render.
+            if (ge_imLastModReason) {
+                ge_imLastModReason = '';
+                ge_updateImStatus();
+            }
             if (ge_imRetryCount > 0 && now - ge_imLastRetryTime > 5000) {
                 ge_imRetryCount = 0;
                 ge_updateImStatus();
             }
             return;
         }
+        ge_imLastModReason = modReason;
+        ge_updateImStatus();
 
         const btn = document.querySelector('button[aria-label="Make video"]')
             || document.querySelector('button[aria-label="Send"]')
@@ -4294,9 +5241,14 @@
     let _ge_origScrollIntoView = null;
     let _ge_userScrolling = false;
 
-    // Track user scroll actions
-    if (typeof document !== 'undefined') {
-        document.addEventListener('wheel', () => { _ge_userScrolling = true; setTimeout(() => { _ge_userScrolling = false; }, 300); }, { passive: true });
+    // Track user scroll actions (only needed while auto-scroll blocking is on)
+    let _ge_wheelTimer = null;
+    if (featureDisableAutoScroll && typeof document !== 'undefined') {
+        document.addEventListener('wheel', () => {
+            _ge_userScrolling = true;
+            clearTimeout(_ge_wheelTimer);
+            _ge_wheelTimer = setTimeout(() => { _ge_userScrolling = false; }, 300);
+        }, { passive: true });
         document.addEventListener('keydown', (e) => {
             if (['PageDown', 'PageUp', 'ArrowDown', 'ArrowUp', 'Home', 'End', ' '].includes(e.key)) {
                 _ge_userScrolling = true; setTimeout(() => { _ge_userScrolling = false; }, 300);
@@ -4356,11 +5308,24 @@
     function ge_updateImStatus() {
         const el = document.getElementById('ge-im-status');
         if (!el) return;
-        let txt = '';
-        if (ge_imInterceptCount > 0) txt += `${ge_imInterceptCount} req modified`;
-        if (ge_imRetryCount > 0) txt += (txt ? ' · ' : '') + `Retry ${ge_imRetryCount}/${ge_imMaxRetries}`;
-        if (!txt) txt = ge_imInterceptOn ? 'Ready — waiting for video gen' : 'Interception OFF';
-        el.textContent = txt;
+        const parts = [];
+        parts.push(ge_imInterceptOn ? 'Intercept ON' : 'Intercept OFF');
+        if (ge_imLastLengthPath) {
+            parts.push(`len→${ge_imVideoLength}s via ${ge_imLastLengthPath}${ge_imLastLengthForced || ge_imLastVideoMiss ? ' (maybe ignored)' : ''}`);
+        } else if (ge_imLastVideoMiss) {
+            parts.push('video seen, length path unknown');
+        }
+        if (ge_imInterceptCount > 0) parts.push(`${ge_imInterceptCount} modified`);
+        if (ge_imRetryCount > 0) parts.push(`retry ${ge_imRetryCount}/${ge_imMaxRetries}`);
+        if (ge_imLastModReason) parts.push('mod: ' + ge_imLastModReason);
+
+        let color = '#4ade80';
+        if (!ge_imInterceptOn) color = '#888';
+        else if (ge_imLastModReason) color = '#f87171';
+        else if (ge_imLastVideoMiss || ge_imLastLengthForced) color = '#f59e0b';
+        el.style.color = color;
+        el.textContent = parts.join(' · ') || (ge_imInterceptOn ? 'Ready — waiting for video gen' : 'Interception OFF');
+        el.title = el.textContent;
     }
 
     function ge_updateImActiveLabel() {
@@ -4368,28 +5333,36 @@
         if (!el) return;
         if (ge_imActivePromptId) {
             const p = ge_getPrompts().find(x => x.id === ge_imActivePromptId);
-            el.textContent = p ? '→ ' + p.name : '';
-            el.style.display = p ? 'block' : 'none';
+            const label = p ? (p.title || p.name) : '';
+            el.textContent = label ? '→ ' + label : '';
+            el.style.display = label ? 'block' : 'none';
         } else {
             el.textContent = '';
             el.style.display = 'none';
         }
     }
 
-    // ── Prompt Manager Dialog ──
+    // ── Prompt Library Dialog (folders, tags, search, import/export) ──
     function ge_openPromptManager() {
         const existing = document.getElementById('ge-prompt-mgr-dlg');
         if (existing) existing.remove();
 
         const dlg = document.createElement('dialog');
         dlg.id = 'ge-prompt-mgr-dlg';
-        dlg.style.cssText = 'position:fixed;inset:0;margin:auto;width:460px;max-height:80vh;background:#1a1a1a;border:1px solid #333;border-radius:12px;color:#ccc;padding:0;z-index:100002;overflow:hidden;';
+        dlg.style.cssText = 'position:fixed;inset:0;margin:auto;width:520px;max-width:96vw;max-height:85vh;background:#1a1a1a;border:1px solid #333;border-radius:12px;color:#ccc;padding:0;z-index:100002;overflow:hidden;';
+
+        let filterQ = '';
+        let filterFolder = 'all'; // 'all' | 'none' | folderId
+        let filterTag = '';
+
+        const btnCss = 'background:#333;color:#aaa;border:none;border-radius:4px;padding:2px 8px;font-size:10px;cursor:pointer;';
+        const primaryCss = 'background:#2d5a3d;color:#4ade80;border:none;border-radius:4px;padding:2px 8px;font-size:10px;cursor:pointer;';
 
         // Header
         const hdr = document.createElement('div');
         hdr.style.cssText = 'display:flex;justify-content:space-between;align-items:center;padding:14px 16px;border-bottom:1px solid #333;';
         const hTitle = document.createElement('div');
-        hTitle.textContent = 'Prompt Manager';
+        hTitle.textContent = 'Prompt Library';
         hTitle.style.cssText = 'font-size:14px;font-weight:700;color:#fff;';
         const hClose = document.createElement('button');
         hClose.textContent = '✕';
@@ -4399,16 +5372,110 @@
         hdr.appendChild(hClose);
         dlg.appendChild(hdr);
 
-        // Body (list)
+        // Toolbar: search + folder + tag
+        const tools = document.createElement('div');
+        tools.style.cssText = 'padding:10px 16px;border-bottom:1px solid #222;display:flex;flex-direction:column;gap:8px;';
+
+        const searchInp = document.createElement('input');
+        searchInp.type = 'search';
+        searchInp.placeholder = 'Search title, body, tags…';
+        searchInp.style.cssText = 'width:100%;padding:8px 10px;background:#111;color:#fff;border:1px solid #333;border-radius:6px;font-size:12px;';
+        searchInp.addEventListener('input', () => { filterQ = searchInp.value.trim().toLowerCase(); renderList(); });
+
+        const filterRow = document.createElement('div');
+        filterRow.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;';
+
+        const folderSel = document.createElement('select');
+        folderSel.style.cssText = 'flex:1;min-width:120px;padding:6px 8px;background:#111;color:#ddd;border:1px solid #333;border-radius:6px;font-size:11px;';
+        folderSel.addEventListener('change', () => { filterFolder = folderSel.value; renderList(); });
+
+        const tagSel = document.createElement('select');
+        tagSel.style.cssText = 'flex:1;min-width:100px;padding:6px 8px;background:#111;color:#ddd;border:1px solid #333;border-radius:6px;font-size:11px;';
+        tagSel.addEventListener('change', () => { filterTag = tagSel.value; renderList(); });
+
+        const newFolderBtn = document.createElement('button');
+        newFolderBtn.textContent = '+ Folder';
+        newFolderBtn.style.cssText = btnCss + 'padding:6px 10px;font-size:11px;';
+        newFolderBtn.addEventListener('click', () => {
+            const name = prompt('Folder name:');
+            if (!name || !name.trim()) return;
+            const folders = ge_getPromptFolders();
+            folders.push({ id: 'folder_' + Date.now(), name: name.trim() });
+            ge_savePromptFolders(folders);
+            rebuildFilters();
+            renderList();
+        });
+
+        filterRow.appendChild(folderSel);
+        filterRow.appendChild(tagSel);
+        filterRow.appendChild(newFolderBtn);
+        tools.appendChild(searchInp);
+        tools.appendChild(filterRow);
+        dlg.appendChild(tools);
+
         const body = document.createElement('div');
-        body.style.cssText = 'padding:12px 16px;overflow-y:auto;max-height:calc(80vh - 120px);display:flex;flex-direction:column;gap:8px;';
+        body.style.cssText = 'padding:12px 16px;overflow-y:auto;max-height:calc(85vh - 200px);display:flex;flex-direction:column;gap:8px;';
+
+        function rebuildFilters() {
+            const folders = ge_getPromptFolders();
+            const prompts = ge_getPrompts();
+            const tags = new Set();
+            prompts.forEach(p => (p.tags || []).forEach(t => tags.add(t)));
+
+            const prevFolder = filterFolder;
+            const prevTag = filterTag;
+            folderSel.innerHTML = '';
+            [
+                { v: 'all', l: 'All folders' },
+                { v: 'none', l: 'No folder' },
+                ...folders.map(f => ({ v: f.id, l: f.name }))
+            ].forEach(({ v, l }) => {
+                const o = document.createElement('option');
+                o.value = v; o.textContent = l;
+                folderSel.appendChild(o);
+            });
+            if ([...folderSel.options].some(o => o.value === prevFolder)) folderSel.value = prevFolder;
+            else { filterFolder = 'all'; folderSel.value = 'all'; }
+
+            tagSel.innerHTML = '';
+            const allOpt = document.createElement('option');
+            allOpt.value = ''; allOpt.textContent = 'All tags';
+            tagSel.appendChild(allOpt);
+            [...tags].sort().forEach(t => {
+                const o = document.createElement('option');
+                o.value = t; o.textContent = '#' + t;
+                tagSel.appendChild(o);
+            });
+            if ([...tagSel.options].some(o => o.value === prevTag)) tagSel.value = prevTag;
+            else { filterTag = ''; tagSel.value = ''; }
+        }
+
+        function filteredPrompts() {
+            return ge_getPrompts().filter(p => {
+                if (filterFolder === 'none' && p.folderId) return false;
+                if (filterFolder !== 'all' && filterFolder !== 'none' && p.folderId !== filterFolder) return false;
+                if (filterTag && !(p.tags || []).includes(filterTag)) return false;
+                if (filterQ) {
+                    const hay = [p.title, p.name, p.body, p.text, p.description, ...(p.tags || [])].join(' ').toLowerCase();
+                    if (!hay.includes(filterQ)) return false;
+                }
+                return true;
+            });
+        }
+
+        function folderName(id) {
+            if (!id) return '';
+            return (ge_getPromptFolders().find(f => f.id === id) || {}).name || '';
+        }
 
         function renderList() {
             body.innerHTML = '';
-            const prompts = ge_getPrompts();
+            const prompts = filteredPrompts();
             if (prompts.length === 0) {
                 const empty = document.createElement('div');
-                empty.textContent = 'No prompts yet. Click "New Prompt" to create one.';
+                empty.textContent = ge_getPrompts().length === 0
+                    ? 'No prompts yet. Click "+ New Prompt" to create one.'
+                    : 'No prompts match the current filters.';
                 empty.style.cssText = 'font-size:12px;color:#666;text-align:center;padding:24px 0;';
                 body.appendChild(empty);
                 return;
@@ -4418,13 +5485,12 @@
                 card.style.cssText = `padding:10px 12px;background:#222;border-radius:8px;border:1px solid ${p.id === ge_imActivePromptId ? '#4ade80' : '#333'};`;
 
                 const topRow = document.createElement('div');
-                topRow.style.cssText = 'display:flex;justify-content:space-between;align-items:center;';
+                topRow.style.cssText = 'display:flex;justify-content:space-between;align-items:center;gap:8px;';
                 const nameEl = document.createElement('div');
-                nameEl.style.cssText = 'font-size:13px;font-weight:600;color:#fff;display:flex;align-items:center;gap:6px;';
+                nameEl.style.cssText = 'font-size:13px;font-weight:600;color:#fff;display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0;';
                 const nameText = document.createElement('span');
-                nameText.textContent = p.name + (p.id === ge_imActivePromptId ? ' ✓' : '');
+                nameText.textContent = (p.title || p.name) + (p.id === ge_imActivePromptId ? ' ✓' : '');
                 nameEl.appendChild(nameText);
-                // Type badge
                 if (p.sourceType && p.sourceType !== 'both') {
                     const badge = document.createElement('span');
                     badge.textContent = p.sourceType === 'image' ? '🖼️' : '🎬';
@@ -4432,12 +5498,29 @@
                     badge.style.cssText = 'font-size:11px;';
                     nameEl.appendChild(badge);
                 }
+                if (p.folderId) {
+                    const fb = document.createElement('span');
+                    fb.textContent = folderName(p.folderId) || 'folder';
+                    fb.style.cssText = 'font-size:10px;color:#888;background:#1a1a1a;padding:1px 6px;border-radius:4px;';
+                    nameEl.appendChild(fb);
+                }
+
                 const btnGroup = document.createElement('div');
-                btnGroup.style.cssText = 'display:flex;gap:4px;';
+                btnGroup.style.cssText = 'display:flex;gap:4px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end;';
+
+                const insertBtn = document.createElement('button');
+                insertBtn.textContent = 'Insert';
+                insertBtn.title = 'Insert into composer';
+                insertBtn.style.cssText = primaryCss;
+                insertBtn.addEventListener('click', () => {
+                    const ok = ge_insertPromptIntoComposer(p.body || p.text);
+                    if (!ok) alert('No composer textarea found on this page.');
+                });
 
                 const useBtn = document.createElement('button');
                 useBtn.textContent = p.id === ge_imActivePromptId ? 'Deselect' : 'Use';
-                useBtn.style.cssText = `background:${p.id === ge_imActivePromptId ? '#333' : '#2d5a3d'};color:${p.id === ge_imActivePromptId ? '#aaa' : '#4ade80'};border:none;border-radius:4px;padding:2px 8px;font-size:10px;cursor:pointer;`;
+                useBtn.title = 'Set as active Imagine inject prompt';
+                useBtn.style.cssText = p.id === ge_imActivePromptId ? btnCss : primaryCss;
                 useBtn.addEventListener('click', () => {
                     if (ge_imActivePromptId === p.id) {
                         ge_imActivePromptId = null;
@@ -4452,23 +5535,24 @@
 
                 const editBtn = document.createElement('button');
                 editBtn.textContent = 'Edit';
-                editBtn.style.cssText = 'background:#333;color:#aaa;border:none;border-radius:4px;padding:2px 8px;font-size:10px;cursor:pointer;';
+                editBtn.style.cssText = btnCss;
                 editBtn.addEventListener('click', () => openEditor(p));
 
                 const delBtn = document.createElement('button');
                 delBtn.textContent = 'Del';
                 delBtn.style.cssText = 'background:#3a2020;color:#f87171;border:none;border-radius:4px;padding:2px 8px;font-size:10px;cursor:pointer;';
                 delBtn.addEventListener('click', () => {
-                    const all = ge_getPrompts().filter(x => x.id !== p.id);
-                    ge_savePrompts(all);
+                    ge_savePrompts(ge_getPrompts().filter(x => x.id !== p.id));
                     if (ge_imActivePromptId === p.id) {
                         ge_imActivePromptId = null;
                         setState('GrokEnhancer_ActivePromptId', null);
                         ge_updateImActiveLabel();
                     }
+                    rebuildFilters();
                     renderList();
                 });
 
+                btnGroup.appendChild(insertBtn);
                 btnGroup.appendChild(useBtn);
                 btnGroup.appendChild(editBtn);
                 btnGroup.appendChild(delBtn);
@@ -4476,15 +5560,33 @@
                 topRow.appendChild(btnGroup);
                 card.appendChild(topRow);
 
+                if (p.tags && p.tags.length) {
+                    const tagRow = document.createElement('div');
+                    tagRow.style.cssText = 'display:flex;gap:4px;flex-wrap:wrap;margin-top:6px;';
+                    p.tags.forEach(t => {
+                        const chip = document.createElement('button');
+                        chip.textContent = '#' + t;
+                        chip.style.cssText = 'background:#1a2a1a;color:#6ee7b7;border:none;border-radius:4px;padding:1px 6px;font-size:10px;cursor:pointer;';
+                        chip.addEventListener('click', () => {
+                            filterTag = t;
+                            tagSel.value = t;
+                            renderList();
+                        });
+                        tagRow.appendChild(chip);
+                    });
+                    card.appendChild(tagRow);
+                }
+
                 if (p.description) {
                     const desc = document.createElement('div');
                     desc.textContent = p.description;
                     desc.style.cssText = 'font-size:11px;color:#888;margin-top:4px;';
                     card.appendChild(desc);
                 }
-                if (p.text) {
+                const bodyText = p.body || p.text || '';
+                if (bodyText) {
                     const preview = document.createElement('div');
-                    preview.textContent = p.text.length > 100 ? p.text.slice(0, 97) + '...' : p.text;
+                    preview.textContent = bodyText.length > 100 ? bodyText.slice(0, 97) + '...' : bodyText;
                     preview.style.cssText = 'font-size:10px;color:#555;margin-top:4px;font-family:monospace;white-space:pre-wrap;word-break:break-all;';
                     card.appendChild(preview);
                 }
@@ -4495,8 +5597,9 @@
         function openEditor(existing) {
             body.innerHTML = '';
             const isNew = !existing;
-            const data = existing || { id: 'prompt_' + Date.now(), name: '', description: '', text: '', sourceType: 'both' };
-            if (!data.sourceType) data.sourceType = 'both';
+            const data = existing
+                ? { ...existing }
+                : { id: 'prompt_' + Date.now(), title: '', description: '', body: '', sourceType: 'both', tags: [], folderId: null };
 
             const mkRow = (label, val, type) => {
                 const r = document.createElement('div');
@@ -4512,10 +5615,29 @@
                 return { row: r, input: inp };
             };
 
-            const nameF = mkRow('Name', data.name, 'text');
+            const titleF = mkRow('Title', data.title || data.name, 'text');
             const descF = mkRow('Description', data.description, 'text');
+            const tagsF = mkRow('Tags (comma-separated)', (data.tags || []).join(', '), 'text');
 
-            // Type selector (Image / Video / Both)
+            const folderRow = document.createElement('div');
+            folderRow.style.cssText = 'display:flex;flex-direction:column;gap:4px;';
+            const folderLbl = document.createElement('label');
+            folderLbl.textContent = 'Folder';
+            folderLbl.style.cssText = 'font-size:11px;color:#888;';
+            const folderEdit = document.createElement('select');
+            folderEdit.style.cssText = 'width:100%;padding:8px;background:#111;color:#fff;border:1px solid #444;border-radius:6px;font-size:12px;';
+            const noneOpt = document.createElement('option');
+            noneOpt.value = ''; noneOpt.textContent = '— None —';
+            folderEdit.appendChild(noneOpt);
+            ge_getPromptFolders().forEach(f => {
+                const o = document.createElement('option');
+                o.value = f.id; o.textContent = f.name;
+                if (data.folderId === f.id) o.selected = true;
+                folderEdit.appendChild(o);
+            });
+            folderRow.appendChild(folderLbl);
+            folderRow.appendChild(folderEdit);
+
             const typeRow = document.createElement('div');
             typeRow.style.cssText = 'display:flex;flex-direction:column;gap:4px;';
             const typeLbl = document.createElement('label');
@@ -4526,15 +5648,17 @@
             ['both', 'image', 'video'].forEach(t => {
                 const opt = document.createElement('option');
                 opt.value = t; opt.textContent = t.charAt(0).toUpperCase() + t.slice(1);
-                if (data.sourceType === t) opt.selected = true;
+                if ((data.sourceType || 'both') === t) opt.selected = true;
                 typeSelect.appendChild(opt);
             });
             typeRow.appendChild(typeLbl);
             typeRow.appendChild(typeSelect);
 
-            const textF = mkRow('Prompt Text', data.text, 'textarea');
-            body.appendChild(nameF.row);
+            const textF = mkRow('Prompt body', data.body || data.text, 'textarea');
+            body.appendChild(titleF.row);
             body.appendChild(descF.row);
+            body.appendChild(tagsF.row);
+            body.appendChild(folderRow);
             body.appendChild(typeRow);
             body.appendChild(textF.row);
 
@@ -4545,17 +5669,26 @@
             saveBtn.textContent = isNew ? 'Create' : 'Save';
             saveBtn.style.cssText = 'background:#2d5a3d;color:#4ade80;border:none;border-radius:6px;padding:6px 16px;font-size:12px;cursor:pointer;';
             saveBtn.addEventListener('click', () => {
-                const name = nameF.input.value.trim();
-                if (!name) { nameF.input.style.borderColor = '#f87171'; return; }
-                data.name = name;
-                data.description = descF.input.value.trim();
-                data.sourceType = typeSelect.value;
-                data.text = textF.input.value;
+                const title = titleF.input.value.trim();
+                if (!title) { titleF.input.style.borderColor = '#f87171'; return; }
+                const now = Date.now();
+                const next = ge_normalizePrompt({
+                    ...data,
+                    title,
+                    description: descF.input.value.trim(),
+                    tags: tagsF.input.value.split(/[,;]/).map(t => t.trim()).filter(Boolean),
+                    folderId: folderEdit.value || null,
+                    sourceType: typeSelect.value,
+                    body: textF.input.value,
+                    updatedAt: now,
+                    createdAt: data.createdAt || now
+                });
                 const all = ge_getPrompts();
-                const idx = all.findIndex(x => x.id === data.id);
-                if (idx >= 0) all[idx] = data;
-                else all.push(data);
+                const idx = all.findIndex(x => x.id === next.id);
+                if (idx >= 0) all[idx] = next;
+                else all.push(next);
                 ge_savePrompts(all);
+                rebuildFilters();
                 renderList();
             });
             const cancelBtn = document.createElement('button');
@@ -4567,34 +5700,81 @@
             body.appendChild(btns);
         }
 
+        rebuildFilters();
         renderList();
         dlg.appendChild(body);
 
         // Footer
         const foot = document.createElement('div');
-        foot.style.cssText = 'padding:10px 16px;border-top:1px solid #333;display:flex;justify-content:space-between;';
+        foot.style.cssText = 'padding:10px 16px;border-top:1px solid #333;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;';
+        const left = document.createElement('div');
+        left.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;';
         const newBtn = document.createElement('button');
         newBtn.textContent = '+ New Prompt';
         newBtn.style.cssText = 'background:#2d5a3d;color:#4ade80;border:none;border-radius:6px;padding:6px 14px;font-size:12px;cursor:pointer;';
         newBtn.addEventListener('click', () => openEditor(null));
+
+        const exportBtn = document.createElement('button');
+        exportBtn.textContent = 'Export';
+        exportBtn.style.cssText = btnCss + 'padding:6px 12px;font-size:12px;';
+        exportBtn.addEventListener('click', () => {
+            const blob = new Blob([JSON.stringify(ge_exportPromptLibrary(), null, 2)], { type: 'application/json' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = `grok_prompts_${Date.now()}.json`;
+            document.body.appendChild(a); a.click();
+            setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+        });
+
+        const importBtn = document.createElement('button');
+        importBtn.textContent = 'Import';
+        importBtn.style.cssText = btnCss + 'padding:6px 12px;font-size:12px;';
+        importBtn.addEventListener('click', () => {
+            const inp = document.createElement('input');
+            inp.type = 'file';
+            inp.accept = 'application/json,.json';
+            inp.addEventListener('change', async () => {
+                const file = inp.files && inp.files[0];
+                if (!file) return;
+                try {
+                    const data = JSON.parse(await file.text());
+                    const mode = confirm('OK = merge with existing\nCancel = replace all prompts') ? 'merge' : 'replace';
+                    const n = ge_importPromptLibrary(data, mode);
+                    rebuildFilters();
+                    renderList();
+                    alert(`Imported. Library now has ${n} prompt(s).`);
+                } catch (e) {
+                    alert('Import failed: ' + (e.message || e));
+                }
+            });
+            inp.click();
+        });
+
+        left.appendChild(newBtn);
+        left.appendChild(exportBtn);
+        left.appendChild(importBtn);
+
         const closeBtn = document.createElement('button');
         closeBtn.textContent = 'Close';
         closeBtn.style.cssText = 'background:#333;color:#aaa;border:none;border-radius:6px;padding:6px 14px;font-size:12px;cursor:pointer;';
         closeBtn.addEventListener('click', () => { dlg.close(); dlg.remove(); });
-        foot.appendChild(newBtn);
+        foot.appendChild(left);
         foot.appendChild(closeBtn);
         dlg.appendChild(foot);
 
         document.body.appendChild(dlg);
         dlg.showModal();
+        searchInp.focus();
     }
 
     // ── Imagine Menu FAB + Panel ──
     function ge_setupImagineMenu() {
-        // CSS
-        const css = document.createElement('style');
-        css.id = 'ge-im-css';
-        css.textContent = `
+        if (_ge_imFabEl) { ge_ensureUiMounted(); return; }
+        if (!document.body) return;
+        if (!document.getElementById('ge-im-css')) {
+            const css = document.createElement('style');
+            css.id = 'ge-im-css';
+            css.textContent = `
             #ge-im-fab {
                 position: fixed; bottom: 12px; right: 56px; z-index: 10001;
                 width: 40px; height: 40px; border-radius: 50%; border: none; cursor: pointer;
@@ -4627,17 +5807,20 @@
                 #ge-im-panel { bottom: 120px; }
             }
         `;
-        document.head.appendChild(css);
+            document.head.appendChild(css);
+        }
 
         // FAB
         const fab = document.createElement('button');
         fab.id = 'ge-im-fab';
         fab.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5"/><path d="M9 18h6"/><path d="M10 22h4"/></svg>';
         fab.title = 'Imagine Menu';
+        _ge_imFabEl = fab;
 
         // Panel
         const panel = document.createElement('div');
         panel.id = 'ge-im-panel';
+        _ge_imPanelEl = panel;
 
         let imOpen = false;
         fab.addEventListener('click', (e) => {
@@ -4781,11 +5964,11 @@
         const d3 = document.createElement('div'); d3.className = 'im-divider';
         section.appendChild(d3);
 
-        // ── Prompt Manager button ──
+        // ── Prompt Library button ──
         const pmRow = document.createElement('div'); pmRow.className = 'im-row';
-        const pmLbl = document.createElement('span'); pmLbl.className = 'im-lbl'; pmLbl.textContent = 'Prompts';
+        const pmLbl = document.createElement('span'); pmLbl.className = 'im-lbl'; pmLbl.textContent = 'Prompt Library';
         const pmBtn = document.createElement('button');
-        pmBtn.textContent = 'Manage';
+        pmBtn.textContent = 'Open';
         pmBtn.style.cssText = 'background:#333;color:#aaa;border:none;border-radius:4px;padding:2px 10px;font-size:11px;cursor:pointer;';
         pmBtn.addEventListener('click', () => ge_openPromptManager());
         pmRow.appendChild(pmLbl); pmRow.appendChild(pmBtn);
@@ -4825,33 +6008,83 @@
         }
     }
 
+    function ge_applyDictationHideCSS(on) {
+        const existingStyle = document.getElementById('ge-dictation-hide-css');
+        if (on) {
+            if (existingStyle) return;
+            const s = document.createElement('style');
+            s.id = 'ge-dictation-hide-css';
+            s.textContent = 'button[aria-label^="Dictation"] { display: none !important; }\n'
+                + 'div:has(> button[aria-label^="Dictation"]) { display: none !important; }';
+            document.head.appendChild(s);
+        } else {
+            if (existingStyle) existingStyle.remove();
+        }
+    }
+
+    function ge_applyVoiceModeHideCSS(on) {
+        const existingStyle = document.getElementById('ge-voice-mode-hide-css');
+        if (on) {
+            if (existingStyle) return;
+            const s = document.createElement('style');
+            s.id = 'ge-voice-mode-hide-css';
+            s.textContent = 'button[aria-label^="Enter voice mode"] { display: none !important; }\n'
+                + 'div:has(> button[aria-label^="Enter voice mode"]) { display: none !important; }';
+            document.head.appendChild(s);
+        } else {
+            if (existingStyle) existingStyle.remove();
+        }
+    }
+
     function init() {
-        setupPanel();
+        if (!document.body) {
+            const wait = new MutationObserver(() => {
+                if (document.body) { wait.disconnect(); init(); }
+            });
+            wait.observe(document.documentElement, { childList: true });
+            return;
+        }
+        try { setupPanel(); } catch (e) { logError('[FAB] setupPanel failed:', e); }
         applyShareHide(featureHideShare);
         ge_applyPopupHideCSS(featureHidePopups);
         ge_applyPremiumHideCSS(featureHidePremium);
+        ge_applyComposerSuggestionsHideCSS(featureHideComposerSuggestions);
+        ge_applyPrivateNoticeHideCSS(featureHidePrivateNotice);
+        ge_applyDictationHideCSS(featureHideDictation);
+        ge_applyVoiceModeHideCSS(featureHideVoiceMode);
         ge_applyHideModelsCSS(featureHideHeavy || featureHideExpert || featureHideAuto || featureHideFollowups);
         ge_applyPrivacyCSS(featurePrivacyMode);
         ge_applyFooterPrivacyCSS();
         startContentObserver();
+        ge_startUiMountGuard();
         ge_startPrivacyGuardObserver();
         ge_startIdleWatch();
         rl_observeDOM();
+        if (featureWeeklyUsage) ge_wuInit();
         if (featureAutoPrivate) ge_autoEnablePrivateMode();
         if (featurePrivacyMode) ge_scanPrivacySensitive();
         if (featureHideHeavy || featureHideExpert || featureHideAuto) ge_markModelItems();
         if (featureHideHeavy) ge_markUpgradeHeavyBtns();
         if (featureHideFollowups) ge_markFollowupContainers();
-        if (featureHideBuildNav || featureHideImagineNav || featureHideSkillsNav) ge_scanSidebarNavHide();
+        if (featureHideBuildNav || featureHideImagineNav || featureHideSkillsNav || featureHideAutomationsNav) ge_scanSidebarNavHide();
         if (featureHidePremium) {
             ge_dismissPremium();
             setTimeout(ge_dismissPremium, 1500); // catch late-rendered Upgrade button
         }
         ge_initDownloader();
         if (featureImagineMenu) ge_setupImagineMenu();
-        if (ge_imPersistentPrompt) ge_startPersistentPromptWatch();
+        if (featureImagineMenu && ge_imPersistentPrompt) ge_startPersistentPromptWatch();
         if (featureDisableAutoScroll) ge_enforceAutoScrollDisable();
-        console.log('[GrokEnhancer] Loaded — Logo:', featureLogo, '| Links:', featureLinks, '| DeMod:', featureDeMod, '| RateLimit:', featureRateLimit, '| Debug:', featureDebug, '| HideShare:', featureHideShare, '| HidePopups:', featureHidePopups, '| HidePremium:', featureHidePremium, '| HideHeavy:', featureHideHeavy, '| HideExpert:', featureHideExpert, '| HideAuto:', featureHideAuto, '| HideFollowups:', featureHideFollowups, '| AutoPrivate:', featureAutoPrivate, '| PrivacyMode:', featurePrivacyMode, '| ImagineMenu:', featureImagineMenu);
+        ge_ensureUiMounted();
+        // One-time migration: normalize prompts to v2 shape on disk if still a bare array
+        try {
+            const raw = localStorage.getItem(GE_PROMPTS_KEY);
+            if (raw) {
+                const parsed = JSON.parse(raw);
+                if (Array.isArray(parsed)) ge_savePrompts(parsed.map(ge_normalizePrompt).filter(Boolean));
+            }
+        } catch (_) {}
+        console.log('[GrokEnhancer] Loaded v2.2.0 — Logo:', featureLogo, '| Links:', featureLinks, '| RateLimit:', featureRateLimit, '| WeeklyUsage:', featureWeeklyUsage, '| Debug:', featureDebug, '| HideShare:', featureHideShare, '| HidePopups:', featureHidePopups, '| HidePremium:', featureHidePremium, '| HideComposerSuggestions:', featureHideComposerSuggestions, '| HideHeavy:', featureHideHeavy, '| HideExpert:', featureHideExpert, '| HideAuto:', featureHideAuto, '| HideFollowups:', featureHideFollowups, '| AutoPrivate:', featureAutoPrivate, '| PrivacyMode:', featurePrivacyMode, '| ImagineMenu:', featureImagineMenu);
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
