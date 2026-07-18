@@ -3,7 +3,7 @@
 **<p align="center"> The all-in-one Grok userscript that you could ever need! </p>**
 
 <p align="center">
-  <a href="https://github.com/Angel2mp3"><img src="https://img.shields.io/badge/Version-2.0-0D47A1?style=for-the-badge&logo=github&logoColor=white" alt="Version"/></a>
+  <a href="https://github.com/Angel2mp3"><img src="https://img.shields.io/badge/Version-2.2.0-0D47A1?style=for-the-badge&logo=github&logoColor=white" alt="Version"/></a>
   <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fuserscript-install-tracker.vercel.app%2Fapi%2Fbadge%3Frepo%3DGrokEnhancer&style=for-the-badge&color=4A148C" alt="Installs"/>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-424242?style=for-the-badge" alt="MIT License"/></a>
 </p>
@@ -24,36 +24,17 @@
 
 **Click the button above → your userscript manager will open and ask you to confirm the install.**
 
----
-
-## 📑 Contents
-
-- [Features](#-features)
-- [Settings](#️-settings)
-- [Technical Details](#-technical-details)
-- [Privacy](#-privacy)
-- [Credits](#-credits)
-
----
-
 ## ✨ Features
 
 ### ★ SuperGrok Logo
 
 Replaces the default Grok greeting logo with the SuperGrok logo.
 
-### 🛠️ DeMod (Moderation Bypass)
+---
 
-Intercepts Grok's fetch and WebSocket responses and strips moderation flags before they reach the UI. Includes content recovery for hard-blocked responses.
+### 💎 Hide Premium Upsells
 
-**Status indicators shown in the settings panel:**
-
-| Status        | Meaning                                                                 |
-| ------------- | ----------------------------------------------------------------------- |
-| 🟢 Safe       | Response passed through clean — no flags detected                       |
-| 🟠 Flagged    | Response had soft flags (e.g. `isFlagged: true`) — DeMod stripped them  |
-| 🔴 Blocked    | Response was hard-blocked — DeMod attempted to recover the real content |
-| 🟡 Recovering | Currently re-fetching blocked content                                   |
+Hides all SuperGrok upgrade prompts and upsell banners across the entire interface — including the sidebar badge, header upgrade button, model menu upsells, "Upgrade plan" menu items, inline banners, and any upgrade dialogs/overlays.
 
 ---
 
@@ -63,21 +44,21 @@ Injects a live counter into the Grok query bar showing your remaining queries an
 
 ---
 
+### 📊 Weekly Usage Bar
+
+Injects a small usage bar very similar to the one in settings/usage under the composer, it **shows your weekly usage divided by what its being used by, such as chat/grok build/api, ect.**
+
+---
+
 ### 🚫 Hide Popups
 
-Automatically dismisses Grok's satisfaction survey popups, "Think Harder/Quick Response", suggestion popups, and more so they don't interrupt your workflow.
+Automatically dismisses Grok's satisfaction survey popups, "Think Harder/Quick Response", suggestion popups, and more.
 
 ---
 
 ### 💬 Hide Follow-up Prompts
 
 Hides Grok's suggested follow-up prompt chips so they don't clutter the end of a response.
-
----
-
-### 💎 Hide Premium Upsells
-
-Hides all SuperGrok upgrade prompts and upsell banners across the entire interface — including the sidebar badge, header upgrade button, model menu upsells, "Upgrade plan" menu items, inline banners, and any upgrade dialogs/overlays.
 
 ---
 
@@ -89,13 +70,19 @@ Hides specific model options from the model selector dropdown. Individually togg
 
 ### 🧭 Hide Sidebar Nav Items
 
-Individually hide the **Build**, **Imagine**, and **Skills and Connectors** entries from the main sidebar menu. Matched by label text rather than link URL, so they keep working even if Grok changes the underlying routes.
+Individually hide the **Build**, **Imagine**, **Skills and Connectors**, and **Automations** entries from the main sidebar menu. Matched by label text rather than link URL, so they keep working even if Grok changes the underlying routes.
 
 ---
 
 ### 🔒 Auto Private Chat
 
-In enabled, automatically enables private chat mode when you open Grok.
+If enabled, automatically enables private chat mode when you open Grok.
+
+---
+
+### 🕶️ Hide Private Chat Notice
+
+Hides the "This chat won't appear in your history and will not be used to train models." banner shown above private/temporary chats. CSS-only, zero overhead.
 
 ---
 
@@ -112,14 +99,12 @@ Automatically hides or blurs conversations with sensitive names from both the si
 **Categories detected:**
 
 - **NSFW / Sexual** — explicit terms, porn site names, kink/fetish terms, etc.
-- **Personal / Medical** — STDs, pregnancy, addiction, mental health, suicide, self-harm
+- **Personal / Medical** — STDs, pregnancy, addiction, mental health, self harm, etc.
 - **Abuse / Assault** — domestic abuse, SA, harassment, stalking, etc.
-- **Drugs** — recreational drugs, vaping, smoking
+- **Drugs** — names of drugs, vaping, smoking, etc.
 - **Legal** — lawsuits, attorneys, court, felonies, arrest, legality
-- **Guns / Ammo / Self-Defense** — firearms, calibers, ammo types, concealed/open carry, specific brands
-- **Bladed & Melee Weapons** — knives, swords, machetes, switchblades, daggers, bayonets, nunchucks, and similar
-- **Archery & Projectiles** — bows, crossbows, slingshots, blowguns
-- **Less-Lethal Tools** — tasers, stun guns, pepper spray, batons, kubotans
+- **Guns / Self-Defense** — firearms, calibers, ammo types, specific brands
+- **And more!**
 
 
 Uses a single pre-compiled regex for performance — no lag even with hundreds of sidebar items.
@@ -130,7 +115,9 @@ Uses a single pre-compiled regex for performance — no lag even with hundreds o
 
 **Panic Hotkey** — set a keyboard shortcut (default `Ctrl+Shift+H`) that instantly toggles Privacy Mode on or off from anywhere, including while typing in the chat composer. Hidden automatically on mobile, since there's no keyboard to trigger it.
 
-**PIN Lock** — set a 4-digit PIN (in the settings panel) to require it before Privacy Mode can be turned **off**, whether that's via the panel checkbox or the Panic Hotkey. The settings panel itself always opens freely — the PIN only stops someone else from switching Privacy Mode off once it's on. Changing or resetting an existing PIN also requires entering it first. With no PIN set, everything behaves as if PIN Lock didn't exist.
+**Auto-Lock on Idle** — optionally turns Privacy Mode **on** automatically after a period of no mouse, keyboard, scroll, or tab activity (default 5 minutes, configurable). Useful if you step away from an unlocked machine.
+
+**PIN Lock** — set a 4-digit PIN (in the settings panel) to require it before Privacy Mode can be turned **off**, whether that's via the panel checkbox or the Panic Hotkey. The settings panel itself always opens freely — the PIN only stops someone else from switching Privacy Mode off once it's on. Changing or resetting an existing PIN also requires entering it first. **This is not fullproof, if the script is turned off from the userscript manager it can bypass this, this isnt something that can be changed**
 
 **Hide Username / Hide Email / Hide Avatar** — hide your account name, email, and/or profile picture in the sidebar footer. All three default **off** and apply automatically whenever Privacy Mode is enabled, but each can be switched on individually if you want that piece of your identity hidden while Privacy Mode is on.
 
@@ -138,7 +125,7 @@ Uses a single pre-compiled regex for performance — no lag even with hundreds o
 
 ### 💡 Imagine Menu
 
-A dedicated floating panel for Grok's `/imagine` video and image generation — activated by the **💡 button** that appears near the main settings FAB.
+A dedicated floating panel for Grok's `/imagine` video and image generation — activated by the **💡 button** that appears near the main settings menu.
 
 | Option                       | Description                                                                                                                                                           |
 | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -147,12 +134,12 @@ A dedicated floating panel for Grok's `/imagine` video and image generation — 
 | **Auto-Retry on Moderation** | Automatically re-submits the prompt when Grok flags or blocks a generation                                                                                            |
 | **Smart Retry**              | On each retry, rewrites the prompt using a different obfuscation strategy (leet speak, zero-width character insertion, synonym swaps) to slip past moderation filters |
 | **Persistent Prompt**        | Saves your last prompt before every retry — if Grok clears the input box after a block, the prompt is automatically restored                                          |
-| **Max Retries**              | How many times Auto-Retry will attempt before giving up (1–20)                                                                                                        |
+| **Max Retries**              | How many times Auto-Retry will attempt before giving up                                                                                                       |
 | **Disable Video Loop**       | Stops generated videos from auto-looping when playback finishes                                                                                                       |
 | **Hide Overlay Controls**    | Hides the control overlay that appears over generated videos                                                                                                          |
-| **Prompts → Manage**         | Opens the Prompt Manager dialog to save, activate, and inject stored prompts into every generation request                                                            |
+| **Prompt Library → Open**    | Folders, tags, search, insert into composer, Imagine “Use” inject, and versioned import/export JSON                                                                   |
 
-A live **status line** inside the panel shows interception count, retry progress, and the currently active saved prompt.
+A live **status line** inside the panel shows intercept on/off, last video-length path (or “maybe ignored”), retry progress, and moderation reason when detected.
 
 ---
 
@@ -171,12 +158,13 @@ Create and manage custom response style instructions that get prepended to your 
 Intercepts Grok's image and video API responses in the background and builds an in-memory lookup table of media URLs, filenames, prompts, and timestamps. Injects download buttons directly onto generated images and videos, and adds a **Mass Download** button on the `/imagine` favorites page.
 
 - Downloads use the original HD URL where available
-- Filenames include timestamp, model name, and prompt for easy organization
+- Filename **templates** (`{date}`, `{id}`, `{type}`, `{prompt}`) with progress UI for multi-file queues
 - Media database is automatically trimmed after 2,000 entries to prevent memory growth in long sessions
 
 ---
 
 ### 🔗 Clickable Links
+**NOTE: (mostly not needed anymore since Grok finally semi-fixed this but helpful for ones that arent clickable)**
 
 Automatically converts URLs, domain names (including subdomains like `clips.twitch.tv` or `sub.site.com`), and `@mentions` in Grok responses into clickable links.
 
@@ -216,50 +204,11 @@ Automatically converts URLs, domain names (including subdomains like `clips.twit
 | twitter / x / tweet   | `x.com/user`                 |
 | *(no context)*        | `x.com/user` (default)       |
 
----
-
-## ⚙️ Settings
-
-Click the **✦ button** in the bottom-right of any Grok page to open the settings panel. Every feature can be toggled individually and is saved automatically. The most-used toggles sit at the top; the rest are grouped into collapsible sections (click a section name to expand it) to keep the panel from getting unwieldy.
-
-**Default state of each toggle**
-
-| Section                | Toggle                        | Default | Description                                        |
-| ----------------------- | ----------------------------- | ------- | --------------------------------------------------- |
-| *(top-level)*            | SuperGrok Logo                | ✅ On    | Replace greeting logo                                |
-| *(top-level)*            | DeMod                         | ✅ On    | Strip moderation flags                               |
-| *(top-level)*            | Rate Limit                    | ✅ On    | Show query counter in input bar                      |
-| UI Cleanup               | Hide Share Button             | ❌ Off   | Hide the Share button on conversations               |
-| UI Cleanup               | Hide Popups                   | ❌ Off   | Auto-dismiss satisfaction & Think Harder popups      |
-| UI Cleanup               | Hide Premium Upsells          | ❌ Off   | Hide all SuperGrok upgrade prompts                   |
-| UI Cleanup               | Hide Follow-up Prompts        | ❌ Off   | Hide Grok's suggested follow-up prompt chips         |
-| UI Cleanup               | Hide Models (Heavy/Expert/Auto) | ❌ Off | Sub-panel — individually hide models from the selector |
-| UI Cleanup               | Hide Build                    | ❌ Off   | Hide the Build entry from the sidebar                |
-| UI Cleanup               | Hide Imagine                  | ❌ Off   | Hide the Imagine entry from the sidebar              |
-| UI Cleanup               | Hide Skills and Connectors    | ❌ Off   | Hide the Skills and Connectors entry from the sidebar |
-| Privacy                  | Auto Private Chat             | ❌ Off   | Auto-enable private mode on load                     |
-| Privacy                  | Privacy Mode                  | ❌ Off   | Hide/blur sensitive chat names from sidebar & dialogs |
-| Privacy                  | Blur Chats (instead of hide)  | ❌ Off   | Blur sensitive chats instead of hiding them          |
-| Privacy                  | Hide Username                 | ❌ Off   | Hide sidebar footer name while Privacy Mode is on    |
-| Privacy                  | Hide Email                    | ❌ Off   | Hide sidebar footer email while Privacy Mode is on   |
-| Privacy                  | Hide Avatar                   | ❌ Off   | Hide sidebar footer profile picture while Privacy Mode is on |
-| Privacy                  | Privacy Custom Words          | —       | Manage button opens custom word list editor          |
-| Privacy                  | Panic Hotkey                  | —       | Set the key combo that instantly toggles Privacy Mode (hidden on mobile) |
-| Privacy                  | PIN Lock                      | ❌ Off   | Set PIN / Reset buttons — requires the PIN to turn Privacy Mode off or to change/reset it |
-| Other                 | Clickable Links               | ✅ On    | Linkify URLs and @mentions                           |
-| Other                 | Hidden Menu Survives Refresh  | ❌ Off   | Keep the settings FAB hidden across page reloads     |
-| Other                 | Disable Auto Scroll           | ❌ Off   | Stop Grok from auto-scrolling during responses       |
-| Other                 | Imagine Menu                  | ❌ Off   | Enable the Imagine Menu floating panel               |
-| Other                 | Debug                         | ❌ Off   | Log DeMod / custom style activity to console         |
-| Other                 | Custom Styles                 | —       | Manage button opens style editor dialog              |
-
----
-
 ## 🔧 Technical Details
 
 - **Run-at:** `document-start` — starts intercepting before any content loads
 - **No external dependencies** — pure vanilla JS, no jQuery or library downloads
-- **GM APIs used:** `GM_xmlhttpRequest` (binary downloads), `unsafeWindow` (fetch/WebSocket interception)
+- **GM APIs used:** `GM_xmlhttpRequest` (binary downloads), `unsafeWindow` (fetch interception)
 - **SPA-aware:** Monitors URL changes to re-apply features across Grok's single-page navigation
 - **Settings** are stored in `localStorage` under `GrokEnhancer_*` keys — local only, never synced
 - **In-memory caches** (e.g. media database) are session-only and cleared on page refresh
@@ -272,9 +221,8 @@ This script runs entirely in your browser — no data is sent anywhere by the sc
 
 - **No analytics or telemetry** of any kind
 - **No external requests** — all network calls go to grok.com's own API (same as normal usage)
-- **DeMod** reads Grok's API responses in-memory to strip moderation flags; response content is never logged or transmitted
 - **Custom Styles** only modifies outgoing request bodies locally — no external server involved
-- The `@grant unsafeWindow` permission is required solely to intercept fetch/WebSocket for DeMod, Custom Styles, and the Media Downloader
+- The `@grant unsafeWindow` permission is required solely to intercept fetch for Custom Styles, the Media Downloader, and the Weekly Usage Bar
 
 ---
 
@@ -284,7 +232,6 @@ This project incorporates elements from these fantastic scripts:
 
 | Script                  | Author                 | Link                                   |
 | ----------------------- | ---------------------- | -------------------------------------- |
-| Grok DeMod | **UniverseDev** | [Greasy Fork](https://greasyfork.org/en/scripts/531147-grok-demod) |
 | Grok Rate Limit Display | **KHROTU, Blankspeaker, CursedAtom** | [Greasy Fork](https://greasyfork.org/en/scripts/558017-grok-rate-limit-display) |
 
 
