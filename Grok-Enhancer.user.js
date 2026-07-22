@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Enhancer
 // @namespace    https://grok.com/
-// @version      2.2.0
+// @version      2.4.0
 // @description  All-in-one Grok enhancement
 // @author       Angel
 // @homepageURL  https://angelmakes.software/
@@ -116,17 +116,29 @@
     }
 
     // ── Feature toggles ──────────────────────────────────────────
-    let featureLogo        = getState('GrokEnhancer_Logo', true);
+    // Mobile detection: coarse pointer + touch/UA. Used to skip desktop-only
+    // work (panic hotkey) and tune tap timing. Not based on viewport width
+    // alone — narrow desktop windows are not mobile.
+    const GE_MOBILE = (() => {
+        try {
+            const coarse = _win.matchMedia && _win.matchMedia('(pointer: coarse)').matches;
+            return !!(coarse && (navigator.maxTouchPoints > 0 || /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent)));
+        } catch (_) { return false; }
+    })();
+
+    let featureLogo        = getState('GrokEnhancer_Logo', false);
     let featureLinks       = getState('GrokEnhancer_Links', false);
     let featureRateLimit   = getState('GrokEnhancer_RateLimit', true);
     let featureWeeklyUsage = getState('GrokEnhancer_WeeklyUsageBar', false);
     let featureDebug       = getState('GrokDeModDebug', false);
     let featureHideShare   = getState('GrokEnhancer_HideShare', false);
+    let featureHidePostToX = getState('GrokEnhancer_HidePostToX', false);
     let featureHidePopups  = getState('GrokEnhancer_HidePopups', false);
     let featureHidePremium = getState('GrokEnhancer_HidePremium', true);
     let featureHideHeavy   = getState('GrokEnhancer_HideHeavy', false);
     let featureHideExpert  = getState('GrokEnhancer_HideExpert', false);
     let featureHideAuto    = getState('GrokEnhancer_HideAuto', false);
+    let featureHideFast    = getState('GrokEnhancer_HideFast', false);
     let featureHideFollowups = getState('GrokEnhancer_HideFollowups', false);
     let featureHideComposerSuggestions = getState('GrokEnhancer_HideComposerSuggestions', false);
     let featureHideBuildNav  = getState('GrokEnhancer_HideBuildNav', false);
@@ -136,16 +148,28 @@
     let featureHidePrivateNotice = getState('GrokEnhancer_HidePrivateNotice', false);
     let featureHideDictation = getState('GrokEnhancer_HideDictation', false);
     let featureHideVoiceMode = getState('GrokEnhancer_HideVoiceMode', false);
+    let featureHideLike = getState('GrokEnhancer_HideLike', false);
+    let featureHideDislike = getState('GrokEnhancer_HideDislike', false);
+    let featureHideRegenerate = getState('GrokEnhancer_HideRegenerate', false);
+    let featureHideMoreActions = getState('GrokEnhancer_HideMoreActions', false);
+    let featureHideCopy = getState('GrokEnhancer_HideCopy', false);
+    let featureHideThinking = getState('GrokEnhancer_HideThinking', false);
     let featureAutoPrivate = getState('GrokEnhancer_AutoPrivate', false);
     let featurePrivacyMode    = getState('GrokEnhancer_Streamer', false);
     let featurePrivacyBlur    = getState('GrokEnhancer_PrivacyBlur', false);
     let featureHideUsername   = getState('GrokEnhancer_HideUsername', false);
     let featureHideEmail      = getState('GrokEnhancer_HideEmail', false);
     let featureHideAvatar     = getState('GrokEnhancer_HideAvatar', false);
+    let featureHideXUsername  = getState('GrokEnhancer_HideXUsername', false);
+    let featureHideBirthYear  = getState('GrokEnhancer_HideBirthYear', false);
     let featureAutoLock       = getState('GrokEnhancer_AutoLock', false);
     let ge_autoLockMinutes    = getState('GrokEnhancer_AutoLockMinutes', 5);
     let featurePinLock        = getState('GrokEnhancer_PinLock', false);
     let ge_activeStyleId   = getState('GrokEnhancer_ActiveStyleId', null);
+
+    // ── Theme Schedule (auto Light/Dark on a daily clock) ──
+    let ge_themeSchedule = getState('GrokEnhancer_ThemeSchedule', { enabled: false, darkStart: '19:00', lightStart: '07:00' });
+    if (!ge_themeSchedule || typeof ge_themeSchedule !== 'object') ge_themeSchedule = { enabled: false, darkStart: '19:00', lightStart: '07:00' };
 
     // ── Imagine Menu state ──
     let featureImagineMenu  = getState('GrokEnhancer_ImagineMenu', false);
@@ -253,21 +277,59 @@
         return ge_getPrompts().length;
     }
 
-    /** Insert prompt body into the visible composer textarea (chat or imagine). */
+    /**
+     * Find the visible composer input (chat or imagine). Desktop Grok uses a
+     * contenteditable div inside .query-bar; mobile web uses a real textarea.
+     * Skips hidden/zero-size elements so auxiliary textareas don't swallow writes.
+     */
+    function ge_findComposer() {
+        const visible = (el) => {
+            if (!el) return false;
+            const r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+        };
+        const candidates = [
+            ...document.querySelectorAll('.query-bar div[contenteditable="true"]'),
+            ...document.querySelectorAll('div[contenteditable="true"]'),
+            ...document.querySelectorAll('textarea[aria-label*="Ask"]'),
+            ...document.querySelectorAll('textarea[aria-label="Make a video"]'),
+            ...document.querySelectorAll('form textarea'),
+            ...document.querySelectorAll('main textarea'),
+            ...document.querySelectorAll('textarea'),
+        ];
+        for (const el of candidates) { if (visible(el)) return el; }
+        return null;
+    }
+
+    /** Read composer text (textarea value or contenteditable text). */
+    function ge_composerText(input) {
+        return input.isContentEditable ? (input.innerText || '') : (input.value || '');
+    }
+
+    /** Write composer text in a way React/Grok picks up (textarea or contenteditable). */
+    function ge_setComposerText(input, text) {
+        if (input.isContentEditable) {
+            input.focus();
+            input.textContent = text;
+            input.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertText', data: text }));
+            input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+            return;
+        }
+        const setter = Object.getOwnPropertyDescriptor(_win.HTMLTextAreaElement.prototype, 'value')?.set;
+        if (setter) setter.call(input, text); else input.value = text;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+
+    /** Insert prompt body into the visible composer (chat or imagine). */
     function ge_insertPromptIntoComposer(body, opts) {
         const text = (body || '').toString();
         if (!text) return false;
         const preferAppend = !!(opts && opts.append);
-        const input = document.querySelector('textarea[aria-label="Make a video"]')
-            || document.querySelector('textarea[aria-label="Ask anything"]')
-            || document.querySelector('form textarea')
-            || document.querySelector('main textarea')
-            || document.querySelector('textarea');
+        const input = ge_findComposer();
         if (!input) return false;
-        const next = preferAppend && input.value ? (input.value + '\n\n' + text) : text;
-        const setter = Object.getOwnPropertyDescriptor(_win.HTMLTextAreaElement.prototype, 'value')?.set;
-        if (setter) setter.call(input, next); else input.value = next;
-        input.dispatchEvent(new Event('input', { bubbles: true }));
+        const current = ge_composerText(input);
+        const next = preferAppend && current ? (current + '\n\n' + text) : text;
+        ge_setComposerText(input, next);
         input.focus();
         return true;
     }
@@ -384,7 +446,10 @@
     let featureFabStayHidden = getState('GrokEnhancer_FabStayHidden', false);
     let _ge_fabHidden = featureFabStayHidden && getState('GrokEnhancer_FabHidden', false);
     let _ge_fabClicks = [];
-    const GE_TRIPLE_CLICK_MS = 500; // max time window for 3 clicks
+    let _ge_fabLastRect = null; // FAB rect captured before hiding, for spot-based restore
+    // Mobile taps arrive slower (click-delay / double-tap-zoom suppression),
+    // so allow a wider window there.
+    const GE_TRIPLE_CLICK_MS = GE_MOBILE ? 800 : 500; // max time window for 3 clicks
 
     // ══════════════════════════════════════════════════════════════
     //  1. SuperGrok Logo Replacement
@@ -433,6 +498,7 @@
                 // New route may have rendered fresh sidebar/command-menu items.
                 ge_rescanPrivacyFull();
             }
+            if (typeof rl_isImagine === 'function') ge_applyImagineFabShift();
         }
     });
     _ge_urlChangeObserver.observe(document, { subtree: true, childList: true });
@@ -450,10 +516,15 @@
         if (!featureLogo || logoReplaced) return;
         const svgs = document.querySelectorAll('svg');
         for (const svg of svgs) {
+            if (!isGreetingLogo(svg)) continue;
+            // Already the SuperGrok logo (same viewBox or already contains the
+            // distinctive wordmark path) — mark done and leave it alone.
+            if (svg.getAttribute('viewBox') === SUPERGROK_VIEWBOX) { logoReplaced = true; return; }
+            const hasWordmark = svg.querySelector('path[d*="M24.3187 12.8506"], path[d*="M56.9253 24.399"]');
+            if (hasWordmark) { logoReplaced = true; return; }
+            // Must be the original Grok logo (two "mark" paths) before replacing.
             const markPaths = svg.querySelectorAll('path[id="mark"]');
             if (markPaths.length < 2) continue;
-            if (!isGreetingLogo(svg)) continue;
-            if (svg.getAttribute('viewBox') === SUPERGROK_VIEWBOX) { logoReplaced = true; return; }
             svg.setAttribute('viewBox', SUPERGROK_VIEWBOX);
             svg.setAttribute('fill-rule', 'evenodd');
             svg.setAttribute('clip-rule', 'evenodd');
@@ -751,7 +822,9 @@
             if (!style) {
                 style = document.createElement('style');
                 style.id = styleId;
-                document.head.appendChild(style);
+                // <head> may not exist yet at document-start — hang styles off
+                // the root element so they're active for first paint.
+                (document.head || document.documentElement).appendChild(style);
             }
             style.textContent = css;
         } else if (style) {
@@ -807,6 +880,10 @@
                 }
                 /* Imagine button with sparkle decoration — hide entire container */
                 span:has([data-sparkle-wrapper]) {
+                    display: none !important;
+                }
+                /* Voice call rating popup ("How was your call?") */
+                div[role="region"][aria-label="Voice call rating"] {
                     display: none !important;
                 }
             `);
@@ -1002,7 +1079,7 @@
     }
 
     // ══════════════════════════════════════════════════════════════
-    //  3d. Hide Models from Model Dropdown (Heavy / Expert / Auto)
+    //  3d. Hide Models from Model Dropdown (Heavy / Expert / Auto / Fast)
     // ══════════════════════════════════════════════════════════════
     const MODELS_HIDE_CSS_ID = 'ge-hide-models-css';
 
@@ -1011,6 +1088,7 @@
                 [data-ge-hidden="model-heavy"] { display: none !important; }
                 [data-ge-hidden="model-expert"] { display: none !important; }
                 [data-ge-hidden="model-auto"] { display: none !important; }
+                [data-ge-hidden="model-fast"] { display: none !important; }
                 [data-ge-hidden="upgrade-heavy"] { display: none !important; }
                 [data-ge-hidden="followups"] { display: none !important; }
             `);
@@ -1047,6 +1125,7 @@
         if (featureHideHeavy) active.push(['Heavy', 'model-heavy']);
         if (featureHideExpert) active.push(['Expert', 'model-expert']);
         if (featureHideAuto) active.push(['Auto', 'model-auto']);
+        if (featureHideFast) active.push(['Fast', 'model-fast']);
         if (active.length === 0) return;
         for (const menu of document.querySelectorAll('[role="menu"]')) {
             for (const item of menu.querySelectorAll('[role="menuitem"]')) {
@@ -1313,6 +1392,109 @@
         ge_applyToggleStyle('ge-footer-privacy-css', rules.length > 0, rules.join('\n'));
     }
 
+    // ── Settings dialog identity masking ──
+    // Preemptively hide Account-panel identity fields via CSS while Privacy Mode
+    // is on, so they never paint in the clear before JS can swap them for the
+    // placeholder. The per-field toggles below decide which ones are unmasked.
+    function ge_applySettingsPrivacyCSS(on) {
+        // Scope to role="dialog" so we only hide identity fields inside the
+        // settings modal, not arbitrary x.com links or avatars elsewhere on the page.
+        const css = `
+            [role="dialog"] img[alt="pfp"],
+            [role="dialog"] div.p-1.min-w-0 > div.text-sm.font-medium,
+            [role="dialog"] div.p-1.min-w-0 > div.text-xs.text-secondary.truncate,
+            [role="dialog"] a[href^="https://x.com/"],
+            [role="dialog"] .text-sm.font-medium > span.text-fg-secondary {
+                visibility: hidden !important;
+            }
+        `;
+        ge_applyToggleStyle('ge-settings-privacy-css', on, css);
+    }
+
+    // The footer CSS above only covers the sidebar. Grok's settings "Account"
+    // dialog exposes the same identity (plus X handle and birth year), so mask
+    // those too — with a visible placeholder instead of a blank space, so the
+    // user knows it's Privacy Mode and not a bug. Originals are stashed in
+    // data attributes and restored when unmasked; React also re-renders the
+    // real values whenever the dialog is reopened.
+    const GE_IDENTITY_PLACEHOLDER = 'Hidden by Privacy Mode';
+    const GE_IDENTITY_TOOLTIP = 'Turn off Privacy Mode (or the matching Hide option) to show this.';
+
+    function _ge_maskTextEl(el, key) {
+        if (!el) return;
+        const attr = 'data-ge-orig-' + key;
+        if (!el.hasAttribute(attr)) el.setAttribute(attr, el.textContent);
+        if (el.textContent !== GE_IDENTITY_PLACEHOLDER) {
+            el.textContent = GE_IDENTITY_PLACEHOLDER;
+            el.title = GE_IDENTITY_TOOLTIP;
+        }
+        // The preemptive CSS hides these fields before JS can swap the text.
+        // Once the placeholder is in place, make the element visible again.
+        el.style.setProperty('visibility', 'visible', 'important');
+    }
+    function _ge_unmaskTextEl(el, key) {
+        if (!el) return;
+        const attr = 'data-ge-orig-' + key;
+        if (!el.hasAttribute(attr)) return;
+        el.textContent = el.getAttribute(attr);
+        el.removeAttribute(attr);
+        el.removeAttribute('title');
+        el.style.setProperty('visibility', 'visible', 'important');
+    }
+
+    function ge_maskSettingsIdentity() {
+        // Locate the settings "Account" panel: an h2 titled "Account", then walk
+        // up to the smallest ancestor that actually holds the identity fields.
+        for (const h2 of document.querySelectorAll('h2')) {
+            if (h2.textContent.trim() !== 'Account') continue;
+            let root = h2.parentElement;
+            for (let i = 0; i < 6 && root; i++) {
+                if (root.querySelector('img[alt="pfp"], a[href^="https://x.com/"]')) break;
+                root = root.parentElement;
+            }
+            if (!root) continue;
+
+            // Display name + email (account header row)
+            const nameEl = root.querySelector('div.p-1.min-w-0 > div.text-sm.font-medium');
+            const emailEl = root.querySelector('div.p-1.min-w-0 > div.text-xs.text-secondary.truncate');
+            if (featurePrivacyMode && featureHideUsername) _ge_maskTextEl(nameEl, 'name'); else _ge_unmaskTextEl(nameEl, 'name');
+            if (featurePrivacyMode && featureHideEmail) _ge_maskTextEl(emailEl, 'email'); else _ge_unmaskTextEl(emailEl, 'email');
+
+            // Avatar — no meaningful placeholder text for an image, just hide it
+            const avatarEl = root.querySelector('img[alt="pfp"]');
+            if (avatarEl) {
+                if (featurePrivacyMode && featureHideAvatar) avatarEl.style.setProperty('visibility', 'hidden', 'important');
+                else avatarEl.style.setProperty('visibility', 'visible', 'important');
+            }
+
+            // X username — replace text AND strip the href, otherwise the
+            // handle still leaks through the hover status bar / copied link.
+            const xLink = root.querySelector('a[href^="https://x.com/"], a[data-ge-orig-xhref]');
+            if (xLink) {
+                if (featurePrivacyMode && featureHideXUsername) {
+                    _ge_maskTextEl(xLink, 'xuser');
+                    if (xLink.hasAttribute('href')) {
+                        if (!xLink.hasAttribute('data-ge-orig-xhref')) xLink.setAttribute('data-ge-orig-xhref', xLink.getAttribute('href'));
+                        xLink.removeAttribute('href');
+                    }
+                } else {
+                    _ge_unmaskTextEl(xLink, 'xuser');
+                    if (xLink.hasAttribute('data-ge-orig-xhref')) {
+                        xLink.setAttribute('href', xLink.getAttribute('data-ge-orig-xhref'));
+                        xLink.removeAttribute('data-ge-orig-xhref');
+                    }
+                }
+            }
+
+            // Birth year — the year sits in a secondary span inside the
+            // "Birth Year" row label.
+            const birthLabel = [...root.querySelectorAll('div.text-sm.font-medium')]
+                .find(el => el.textContent.trim().startsWith('Birth Year'));
+            const birthEl = birthLabel ? birthLabel.querySelector('span.text-fg-secondary') : null;
+            if (featurePrivacyMode && featureHideBirthYear) _ge_maskTextEl(birthEl, 'birthyear'); else _ge_unmaskTextEl(birthEl, 'birthyear');
+        }
+    }
+
     function _ge_testSensitive(text) {
         if (!text) return false;
         return _GE_PRIVACY_COMBINED.test(text);
@@ -1334,11 +1516,10 @@
     let _ge_privacyHiddenCount = 0;
 
     function ge_updatePrivacyBadge() {
+        // Badge intentionally kept empty: Privacy Mode toggle only shows the
+        // feature name and the switch, never the count of hidden/blurred chats.
         const badge = document.getElementById('ge-privacy-badge');
-        if (!badge) return;
-        if (_ge_privacyHiddenCount <= 0) { badge.textContent = ''; return; }
-        const label = featurePrivacyBlur ? 'blurred' : 'hidden';
-        badge.textContent = ` (${_ge_privacyHiddenCount} ${label})`;
+        if (badge) badge.textContent = '';
     }
 
     // scope: undefined/null = full document scan (initial load, toggle-on, word-list edits).
@@ -1425,11 +1606,16 @@
         setState('GrokEnhancer_Streamer', on);
         ge_applyPrivacyCSS(on);
         ge_applyFooterPrivacyCSS();
+        ge_applySettingsPrivacyCSS(on);
+        ge_maskSettingsIdentity();
         if (on) {
             // Rescan immediately so already-rendered items hide, then again after the
             // current event/mutation batch settles in case React is mid-render.
             ge_rescanPrivacyFull();
             requestAnimationFrame(() => ge_rescanPrivacyFull());
+            // If the user is sitting in a chat that just became hidden, move
+            // them out of it — sidebar hiding alone leaves it on screen.
+            ge_leaveSensitiveChat();
         }
         const checkbox = document.querySelector('#ge-panel #ge-privacy-toggle-input');
         if (checkbox) checkbox.checked = on;
@@ -1447,6 +1633,17 @@
         const checkbox = document.querySelector('#ge-panel #ge-privacy-toggle-input');
         if (checkbox) checkbox.checked = true;
         ge_promptPinVerify(() => ge_setPrivacyMode(false), 'Enter PIN to disable Privacy Mode', 'Unlock');
+    }
+
+    // Gates "turning off" a privacy protection behind the PIN (when one is set),
+    // same as disabling Privacy Mode itself. Returns true when the prompt was
+    // opened — the caller must NOT apply the change itself in that case; the
+    // checkbox is re-synced so the UI never lies while the prompt is open.
+    function ge_requestProtectedToggleOff(input, on, applyOff, promptTitle) {
+        if (on || !_ge_hasPinSet()) return false;
+        if (input) input.checked = true;
+        ge_promptPinVerify(applyOff, promptTitle, 'Unlock');
+        return true;
     }
 
     // ── Panic hotkey: instantly toggle Privacy Mode from anywhere, including
@@ -1472,18 +1669,140 @@
     }
 
     // Use capture phase so Grok's own keydown handlers can't stopPropagation
-    // before the panic hotkey fires.
-    document.addEventListener('keydown', (e) => {
-        if (ge_matchesHotkey(e, ge_privacyHotkey)) {
-            e.preventDefault();
-            ge_requestPrivacyModeChange(!featurePrivacyMode);
+    // before the panic hotkey fires. Skipped on mobile: no physical keyboard,
+    // and the hotkey row in the panel is already hidden there.
+    if (!GE_MOBILE) {
+        document.addEventListener('keydown', (e) => {
+            if (ge_matchesHotkey(e, ge_privacyHotkey)) {
+                e.preventDefault();
+                ge_requestPrivacyModeChange(!featurePrivacyMode);
+            }
+        }, true);
+    }
+
+    // ── Theme Schedule: auto-switch Grok's Light/Dark theme on a daily clock ──
+    function ge_themeDesiredMode(now) {
+        const toMin = (t) => { const m = /^(\d{1,2}):(\d{2})$/.exec(t || ''); return m ? (+m[1]) * 60 + (+m[2]) : null; };
+        const dark = toMin(ge_themeSchedule.darkStart), light = toMin(ge_themeSchedule.lightStart);
+        if (dark === null || light === null || dark === light) return null;
+        const mins = now.getHours() * 60 + now.getMinutes();
+        // Overnight range (darkStart > lightStart): dark runs through midnight.
+        const isDark = dark < light ? (mins >= dark && mins < light) : (mins >= dark || mins < light);
+        return isDark ? 'dark' : 'light';
+    }
+
+    function ge_currentGrokTheme() {
+        const pressed = document.querySelector('div[role="group"][aria-label="Theme"] button[aria-pressed="true"]');
+        const lbl = pressed?.getAttribute('aria-label');
+        if (lbl === 'Dark' || lbl === 'Light') return lbl.toLowerCase();
+        const de = document.documentElement;
+        if (de.classList.contains('dark')) return 'dark';
+        if (de.classList.contains('light')) return 'light';
+        try {
+            const stored = localStorage.getItem('theme');
+            if (stored === 'dark' || stored === 'light') return stored;
+        } catch (_) {}
+        return null;
+    }
+
+    function ge_applyGrokTheme(mode) {
+        // Path 1: Grok's own Appearance buttons (only in the DOM while the
+        // settings dialog is open) — the one fully reliable switch.
+        const group = document.querySelector('div[role="group"][aria-label="Theme"]');
+        if (group) {
+            const btn = group.querySelector(`button[aria-label="${mode === 'dark' ? 'Dark' : 'Light'}"]`);
+            if (btn) {
+                if (btn.getAttribute('aria-pressed') !== 'true') { btn.click(); logDebug('[ThemeSchedule] clicked site theme button →', mode); }
+                return;
+            }
         }
-    }, true);
+        // Path 2 (best-effort heuristic — Grok's exact theme persistence isn't
+        // verified): next-themes-style class on <html> + colorScheme + a
+        // 'theme' storage key. Also dispatch a synthetic storage event so any
+        // listening next-themes controller can react without a page reload.
+        const de = document.documentElement;
+        de.classList.toggle('dark', mode === 'dark');
+        de.classList.toggle('light', mode === 'light');
+        de.style.colorScheme = mode;
+        try {
+            localStorage.setItem('theme', mode);
+            _win.dispatchEvent(new StorageEvent('storage', {
+                key: 'theme', newValue: mode, oldValue: mode === 'dark' ? 'light' : 'dark',
+                url: location.href, storageArea: localStorage
+            }));
+        } catch (_) {}
+        logDebug('[ThemeSchedule] applied class/storage fallback →', mode);
+    }
+
+    let _ge_themeTimer = null;
+    let _ge_themeVisBound = false;
+    let _ge_themeObs = null;
+    let _ge_themeObsDebounce = null;
+    function ge_themeTick() {
+        if (!ge_themeSchedule || !ge_themeSchedule.enabled) return;
+        const desired = ge_themeDesiredMode(new Date());
+        if (!desired) return;
+        if (ge_currentGrokTheme() === desired) return;
+        ge_applyGrokTheme(desired);
+    }
+    // Milliseconds until the next schedule boundary (darkStart or lightStart),
+    // always in the future — so we can sleep until exactly then instead of polling.
+    function ge_themeMsToNextBoundary() {
+        const toMin = (t) => { const m = /^(\d{1,2}):(\d{2})$/.exec(t || ''); return m ? (+m[1]) * 60 + (+m[2]) : null; };
+        const now = new Date();
+        const nowMin = now.getHours() * 60 + now.getMinutes() + now.getSeconds() / 60;
+        const candidates = [toMin(ge_themeSchedule.darkStart), toMin(ge_themeSchedule.lightStart)]
+            .filter(v => v !== null)
+            .map(v => ((v - nowMin) % 1440 + 1440) % 1440); // minutes until each, 0..1440
+        if (!candidates.length) return 60000;
+        // Fire a hair after the boundary so the tick lands inside the new period.
+        return Math.max(Math.min(...candidates), 0) * 60000 + 1000;
+    }
+    function ge_themeScheduleNext() {
+        clearTimeout(_ge_themeTimer);
+        if (!ge_themeSchedule || !ge_themeSchedule.enabled) { _ge_themeTimer = null; return; }
+        _ge_themeTimer = setTimeout(() => {
+            ge_themeTick();
+            ge_themeScheduleNext();
+        }, ge_themeMsToNextBoundary());
+    }
+    function ge_startThemeScheduler() {
+        ge_themeTick(); // apply the correct theme immediately, don't wait for a boundary
+        ge_themeScheduleNext();
+        // Watch for the settings dialog opening: whenever the Theme button group
+        // appears, enforce the scheduled mode in case earlier ticks missed it.
+        if (!_ge_themeObs && document.body) {
+            _ge_themeObs = new MutationObserver((mutations) => {
+                if (!ge_themeSchedule || !ge_themeSchedule.enabled) return;
+                const hasGroup = mutations.some(m => [...m.addedNodes].some(n => {
+                    if (n.nodeType !== Node.ELEMENT_NODE) return false;
+                    return n.matches?.('div[role="group"][aria-label="Theme"]') || !!n.querySelector?.('div[role="group"][aria-label="Theme"]');
+                }));
+                if (!hasGroup) return;
+                clearTimeout(_ge_themeObsDebounce);
+                _ge_themeObsDebounce = setTimeout(ge_themeTick, 50);
+            });
+            _ge_themeObs.observe(document.body, { childList: true, subtree: true });
+        }
+        // Backgrounded tabs (especially mobile) may sleep straight past a
+        // boundary — catch up the moment the tab becomes visible again.
+        if (!_ge_themeVisBound) {
+            _ge_themeVisBound = true;
+            document.addEventListener('visibilitychange', () => {
+                if (document.visibilityState === 'visible' && ge_themeSchedule && ge_themeSchedule.enabled) {
+                    ge_themeTick();
+                    ge_themeScheduleNext();
+                }
+            });
+        }
+    }
 
     // ── Auto-lock on idle: enable Privacy Mode automatically after N minutes
-    // of no mouse/keyboard/tab activity. ──
+    // of no mouse/keyboard/touch/tab activity. ──
     let _ge_idleTimer = null;
+    let _ge_lastActivity = Date.now();
     function ge_resetIdleTimer() {
+        _ge_lastActivity = Date.now();
         clearTimeout(_ge_idleTimer);
         if (!featureAutoLock) return;
         _ge_idleTimer = setTimeout(() => {
@@ -1491,10 +1810,19 @@
         }, ge_autoLockMinutes * 60 * 1000);
     }
     function ge_startIdleWatch() {
-        ['mousemove', 'keydown', 'click', 'scroll'].forEach(evt =>
+        ['mousemove', 'keydown', 'click', 'scroll', 'touchstart', 'touchmove', 'pointerdown'].forEach(evt =>
             document.addEventListener(evt, ge_resetIdleTimer, { passive: true }));
         document.addEventListener('visibilitychange', () => {
-            if (!document.hidden) ge_resetIdleTimer();
+            if (document.hidden) return;
+            // Mobile browsers suspend timers in background tabs — a bare reset
+            // here would cancel the lock entirely. Lock immediately if the idle
+            // threshold already elapsed while the tab was away.
+            if (featureAutoLock && !featurePrivacyMode &&
+                Date.now() - _ge_lastActivity >= ge_autoLockMinutes * 60 * 1000) {
+                ge_setPrivacyMode(true);
+                return;
+            }
+            ge_resetIdleTimer();
         });
         ge_resetIdleTimer();
     }
@@ -1598,6 +1926,7 @@
                         featurePinLock = true;
                         setState('GrokEnhancer_PinLock', true);
                         if (onDone) onDone();
+                        ge_openPrivacyNotice();
                         return true;
                     },
                 });
@@ -1606,7 +1935,47 @@
         });
     }
 
+    // ── One-time notice the first time Privacy Mode / a PIN is enabled: sets
+    // honest expectations (anti-snooping, not encryption) and quietly documents
+    // the forgotten-PIN recovery path without advertising it in the panel UI. ──
+    function ge_openPrivacyNotice() {
+        if (getState('GrokEnhancer_PrivacyNoticeSeen', false)) return;
+        setState('GrokEnhancer_PrivacyNoticeSeen', true);
+
+        const existing = document.getElementById('ge-privacy-notice-modal');
+        if (existing) { try { existing.close(); } catch (_) {} existing.remove(); }
+
+        const dlg = document.createElement('dialog');
+        dlg.id = 'ge-privacy-notice-modal';
+        dlg.style.cssText = 'background:#1a1a1a;border:1px solid #333;border-radius:12px;width:340px;padding:20px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#ccc;';
+        const bkStyle = document.createElement('style');
+        bkStyle.textContent = '#ge-privacy-notice-modal::backdrop{background:rgba(0,0,0,0.6)}';
+        dlg.appendChild(bkStyle);
+
+        const body = document.createElement('div');
+        body.style.cssText = 'font-size:12px;line-height:1.6;text-align:left;';
+        body.innerHTML =
+            '<b style="font-size:13px;">About Privacy Mode &amp; the PIN</b><br><br>' +
+            '• These protections are meant for casual snooping — someone glancing at or sitting down at your screen. They are <b>not real encryption</b>.<br>' +
+            '• Anyone who uninstalls this script from their script-manager extension bypasses them entirely.<br>' +
+            '• If you forget your PIN, clearing site data for this site (or deleting the script\u2019s <code>GrokEnhancer_\u2026</code> localStorage keys) wipes all settings including the PIN.<br>' +
+            '• You can back up your settings anytime under <b>Other → Export Settings</b> at the bottom of the menu.';
+        dlg.appendChild(body);
+
+        const okBtn = document.createElement('button');
+        okBtn.textContent = 'Got it';
+        okBtn.style.cssText = 'margin-top:14px;background:#333;color:#ccc;border:none;border-radius:6px;padding:6px 18px;font-size:12px;cursor:pointer;';
+        okBtn.addEventListener('click', () => dlg.close());
+        dlg.appendChild(okBtn);
+
+        document.body.appendChild(dlg);
+        dlg.showModal();
+    }
+
     // ── Mask the open chat's own title (browser tab + on-page header) ──
+    // Saved as { cid, title } so a stale title is never restored onto a
+    // different page after SPA navigation — that leaked the sensitive chat's
+    // name into the tab of whatever chat was opened next.
     let _ge_privacyRealTitle = null;
 
     function ge_maskPrivacyTitle() {
@@ -1615,10 +1984,14 @@
         const sensitive = !!(featurePrivacyMode && cached && cached.sensitive);
 
         if (sensitive) {
-            if (_ge_privacyRealTitle === null) _ge_privacyRealTitle = document.title;
+            if (!_ge_privacyRealTitle || _ge_privacyRealTitle.cid !== cid) {
+                _ge_privacyRealTitle = { cid, title: document.title };
+            }
             document.title = 'Grok';
-        } else if (_ge_privacyRealTitle !== null) {
-            document.title = _ge_privacyRealTitle;
+        } else if (_ge_privacyRealTitle) {
+            // Only restore onto the chat the title was captured from. Anywhere
+            // else the SPA owns the tab title and the saved one is stale.
+            if (_ge_privacyRealTitle.cid === cid) document.title = _ge_privacyRealTitle.title;
             _ge_privacyRealTitle = null;
         }
 
@@ -1637,6 +2010,32 @@
             heading.style.setProperty('visibility', 'hidden', 'important');
         }
     }
+
+    // Panic safety: if Privacy Mode turns on while the user is sitting inside a
+    // chat that matches their privacy words/categories, hiding it in the
+    // sidebar isn't enough — move them to a fresh chat.
+    function ge_leaveSensitiveChat() {
+        const cid = ge_extractPostId(location.pathname);
+        if (!cid) return; // already on the new-chat page
+        const cached = _ge_privacyTitleCache.get(cid);
+        const link = document.querySelector(`[data-sidebar] a[href="/c/${cid}"]`);
+        const title = (cached && cached.text) || (link ? link.textContent.trim() : '');
+        const sensitive = !!(cached && cached.sensitive) || _ge_testSensitive(title);
+        if (!sensitive) return;
+        // Mask the tab now — the SPA may not set a title for the new-chat page,
+        // and the old chat's name must not linger there.
+        _ge_privacyRealTitle = null;
+        document.title = 'Grok';
+        const newChatLink = document.querySelector('[data-sidebar] a[href="/"]');
+        if (newChatLink) newChatLink.click();
+        else location.assign('/');
+    }
+
+    // Document-start: privacy CSS must be active before first paint — waiting
+    // for init() (which needs <body>) let sensitive items flash on page load.
+    // All state these touch is declared above this point; safe to run now.
+    ge_applyPrivacyCSS(featurePrivacyMode);
+    ge_applyFooterPrivacyCSS();
 
     function ge_openPrivacyWordsEditor() {
         let existing = document.getElementById('ge-privacy-words-modal');
@@ -2348,10 +2747,10 @@
                 } else {
                     const loc = localFallback();
                     if (loc !== null) {
-                        rl_appendSpan(cd, loc, '#f59e0b');
+                        rl_appendSpan(cd, loc, '#9ca3af');
                         rc.title = `Local estimate (API: ${rl_lastApiError || 'error'}). Click to retry.`;
                     } else {
-                        rl_appendSpan(cd, '—', '#f59e0b');
+                        rl_appendSpan(cd, '—', '#9ca3af');
                         rc.title = `Rate limit API offline${rl_lastApiError ? ': ' + rl_lastApiError : ''}. Click to retry.`;
                     }
                 }
@@ -2361,15 +2760,16 @@
                 else {
                     const loc = localFallback();
                     if (loc !== null) {
-                        rl_appendSpan(cd, loc, '#f59e0b');
+                        rl_appendSpan(cd, loc, '#9ca3af');
                         rc.title = `Local estimate (API: ${rl_lastApiError || 'error'}). Click to retry.`;
                     } else {
-                        rl_appendSpan(cd, '—', '#f59e0b');
+                        rl_appendSpan(cd, '—', '#9ca3af');
                         rc.title = `Rate limit API offline${rl_lastApiError ? ': ' + rl_lastApiError : ''}. Click to retry.`;
                     }
                 }
             }
             rl_setGaugeSVG(svg);
+            rl_scheduleErrorRetry();
         } else {
             if (rl_countdownTimer) { clearInterval(rl_countdownTimer); rl_countdownTimer = null; }
             if (isBoth) {
@@ -2440,6 +2840,19 @@
             if (!rl_cache[model]) rl_cache[model] = {};
             rl_cache[model][kind] = undefined; return { error: true };
         }
+    }
+
+    // After an API error, auto-retry once in the background so the badge
+    // recovers on its own (mobile networks fail this call regularly).
+    let _rl_errorRetryTimer = null;
+    function rl_scheduleErrorRetry() {
+        if (_rl_errorRetryTimer) return;
+        _rl_errorRetryTimer = setTimeout(() => {
+            _rl_errorRetryTimer = null;
+            if (document.visibilityState !== 'visible') { rl_scheduleErrorRetry(); return; }
+            const qb = document.querySelector(RL_QBAR_SEL);
+            if (qb && typeof rl_fetchAndUpdate === 'function') rl_fetchAndUpdate(qb, true);
+        }, 15000);
     }
 
     function rl_getWaitTime(obj) {
@@ -3072,18 +3485,35 @@
             });
             if (!res.ok) {
                 logDebug('[WeeklyUsage] HTTP', res.status);
+                ge_wuScheduleRetry();
                 return ge_wuCache;
             }
             const ok = ge_wuIngestBuffer(await res.arrayBuffer(), 'api');
-            if (!ok && !ge_wuCache) ge_wuHide();
+            if (!ok && !ge_wuCache) { ge_wuHide(); ge_wuScheduleRetry(); }
+            else _ge_wuRetryCount = 0;
             return ge_wuCache;
         } catch (e) {
             logDebug('[WeeklyUsage] fetch failed', e?.message || e);
             if (!ge_wuCache) ge_wuHide();
+            ge_wuScheduleRetry();
             return ge_wuCache;
         } finally {
             ge_wuFetching = false;
         }
+    }
+
+    // Retry a failed initial load a few times (mobile tabs are often suspended
+    // or on flaky networks when the first fetch fires). Stops once data lands.
+    let _ge_wuRetryCount = 0;
+    function ge_wuScheduleRetry() {
+        if (ge_wuCache || _ge_wuRetryCount >= 6) return;
+        _ge_wuRetryCount++;
+        clearTimeout(ge_wuSoftTimer);
+        ge_wuSoftTimer = setTimeout(() => {
+            if (!featureWeeklyUsage || ge_wuCache) return;
+            if (document.visibilityState !== 'visible') { _ge_wuRetryCount--; ge_wuScheduleRetry(); return; }
+            ge_wuFetch(true);
+        }, 10000);
     }
 
     function ge_wuScheduleSoftRefresh() {
@@ -3460,28 +3890,36 @@
             if (featureHideHeavy) names.push('Heavy');
             if (featureHideExpert) names.push('Expert');
             if (featureHideAuto) names.push('Auto');
+            if (featureHideFast) names.push('Fast');
             trigger.textContent = names.length ? names.join(', ') : 'None';
         }
 
+        const ge_refreshHideModelsCSS = () => ge_applyHideModelsCSS(featureHideHeavy || featureHideExpert || featureHideAuto || featureHideFast || featureHideFollowups);
         const heavyToggle = createToggle('Heavy', featureHideHeavy, (on) => {
             featureHideHeavy = on; setState('GrokEnhancer_HideHeavy', on);
-            ge_markModelItems(); ge_markUpgradeHeavyBtns(); updateSummary();
+            ge_refreshHideModelsCSS(); ge_markModelItems(); ge_markUpgradeHeavyBtns(); updateSummary();
             panelAddLog(`Hide Heavy Model ${on ? 'ON' : 'OFF'}`);
         });
         const expertToggle = createToggle('Expert', featureHideExpert, (on) => {
             featureHideExpert = on; setState('GrokEnhancer_HideExpert', on);
-            ge_markModelItems(); updateSummary();
+            ge_refreshHideModelsCSS(); ge_markModelItems(); updateSummary();
             panelAddLog(`Hide Expert Model ${on ? 'ON' : 'OFF'}`);
         });
         const autoToggle = createToggle('Auto', featureHideAuto, (on) => {
             featureHideAuto = on; setState('GrokEnhancer_HideAuto', on);
-            ge_markModelItems(); updateSummary();
+            ge_refreshHideModelsCSS(); ge_markModelItems(); updateSummary();
             panelAddLog(`Hide Auto Model ${on ? 'ON' : 'OFF'}`);
+        });
+        const fastToggle = createToggle('Fast', featureHideFast, (on) => {
+            featureHideFast = on; setState('GrokEnhancer_HideFast', on);
+            ge_refreshHideModelsCSS(); ge_markModelItems(); updateSummary();
+            panelAddLog(`Hide Fast Model ${on ? 'ON' : 'OFF'}`);
         });
 
         dropdown.appendChild(heavyToggle.row);
         dropdown.appendChild(expertToggle.row);
         dropdown.appendChild(autoToggle.row);
+        dropdown.appendChild(fastToggle.row);
 
         // Keep the dropdown open when clicking toggles inside it; only a click outside
         // or on the trigger should close it.
@@ -3491,7 +3929,11 @@
             e.stopPropagation();
             const isOpen = dropdown.classList.contains('open');
             document.querySelectorAll('#ge-panel .ge-dropdown.open').forEach(d => {
-                if (d !== dropdown && !d.contains(dropdown) && !dropdown.contains(d)) d.classList.remove('open');
+                if (d !== dropdown && !d.contains(dropdown) && !dropdown.contains(d)) {
+                    d.classList.remove('open');
+                    const t = d.previousElementSibling && d.previousElementSibling.querySelector('.ge-dropdown-trigger');
+                    if (t) t.textContent = '▸';
+                }
             });
             dropdown.classList.toggle('open', !isOpen);
         });
@@ -3538,7 +3980,11 @@
             e.stopPropagation();
             const isOpen = dropdown.classList.contains('open');
             document.querySelectorAll('#ge-panel .ge-dropdown.open').forEach(d => {
-                if (d !== dropdown && !d.contains(dropdown) && !dropdown.contains(d)) d.classList.remove('open');
+                if (d !== dropdown && !d.contains(dropdown) && !dropdown.contains(d)) {
+                    d.classList.remove('open');
+                    const t = d.previousElementSibling && d.previousElementSibling.querySelector('.ge-dropdown-trigger');
+                    if (t) t.textContent = '▸';
+                }
             });
             dropdown.classList.toggle('open', !isOpen);
             trigger.textContent = isOpen ? '▸' : '▾';
@@ -3563,7 +4009,21 @@
         { label: 'Clickable Links', get: () => featureLinks, stateKey: 'GrokEnhancer_Links',
           onToggle: (on) => { featureLinks = on; } },
         { label: 'Hide Share Button', get: () => featureHideShare, stateKey: 'GrokEnhancer_HideShare',
-          onToggle: (on) => { featureHideShare = on; applyShareHide(on); } },
+          onToggle: (on) => { featureHideShare = on; ge_applyExtraCleanupCSS(); } },
+        { label: 'Hide Post to X Button', get: () => featureHidePostToX, stateKey: 'GrokEnhancer_HidePostToX',
+          onToggle: (on) => { featureHidePostToX = on; ge_applyExtraCleanupCSS(); } },
+        { label: 'Hide Like Button', get: () => featureHideLike, stateKey: 'GrokEnhancer_HideLike',
+          onToggle: (on) => { featureHideLike = on; ge_applyExtraCleanupCSS(); } },
+        { label: 'Hide Dislike Button', get: () => featureHideDislike, stateKey: 'GrokEnhancer_HideDislike',
+          onToggle: (on) => { featureHideDislike = on; ge_applyExtraCleanupCSS(); } },
+        { label: 'Hide Regenerate Button', get: () => featureHideRegenerate, stateKey: 'GrokEnhancer_HideRegenerate',
+          onToggle: (on) => { featureHideRegenerate = on; ge_applyExtraCleanupCSS(); } },
+        { label: 'Hide More Options Button', get: () => featureHideMoreActions, stateKey: 'GrokEnhancer_HideMoreActions',
+          onToggle: (on) => { featureHideMoreActions = on; ge_applyExtraCleanupCSS(); } },
+        { label: 'Hide Copy Button', get: () => featureHideCopy, stateKey: 'GrokEnhancer_HideCopy',
+          onToggle: (on) => { featureHideCopy = on; ge_applyExtraCleanupCSS(); } },
+        { label: 'Hide Thinking/Thoughts', get: () => featureHideThinking, stateKey: 'GrokEnhancer_HideThinking',
+          onToggle: (on) => { featureHideThinking = on; ge_applyExtraCleanupCSS(); } },
         { label: 'Hide Popups', get: () => featureHidePopups, stateKey: 'GrokEnhancer_HidePopups',
           onToggle: (on) => { featureHidePopups = on; ge_applyPopupHideCSS(on); } },
         { label: 'Hide Premium Upsells', get: () => featureHidePremium, stateKey: 'GrokEnhancer_HidePremium',
@@ -3610,6 +4070,9 @@
 
         // ── Triple-click to hide FAB ─────────────────────────────
         function _ge_handleFabTripleClick() {
+            // Remember where the FAB was — on mobile it sits ~80px above the
+            // bottom (safe-area CSS), so a fixed corner threshold misses it.
+            _ge_fabLastRect = fab.getBoundingClientRect();
             _ge_fabHidden = true;
             if (featureFabStayHidden) setState('GrokEnhancer_FabHidden', true);
             fab.style.display = 'none';
@@ -3642,24 +4105,36 @@
             _ge_reallyTogglePanel();
         });
 
-        // Restore FAB via triple-click on bottom-right corner area
+        // Restore FAB via triple-click on the spot where the FAB was.
+        // pointerup (capture) is used alongside click because rapid taps on
+        // mobile get suppressed/delayed as double-tap-zoom gestures, and the
+        // page under the corner may stopPropagation bubble-phase clicks.
+        const _ge_tryRestoreAt = (x, y) => {
+            if (!_ge_fabHidden) return;
+            const pad = 20;
+            const r = _ge_fabLastRect;
+            // Fall back to a generous bottom-right box if no rect was recorded
+            // (e.g. FAB hidden in a previous session).
+            const inSpot = r
+                ? (x >= r.left - pad && x <= r.right + pad && y >= r.top - pad && y <= r.bottom + pad)
+                : ((window.innerWidth - x) < 90 && (window.innerHeight - y) < 150);
+            if (!inSpot) return;
+            const now = Date.now();
+            _ge_fabClicks.push(now);
+            _ge_fabClicks = _ge_fabClicks.filter(t => now - t < GE_TRIPLE_CLICK_MS);
+            if (_ge_fabClicks.length >= 3) {
+                _ge_fabClicks = [];
+                _ge_fabHidden = false;
+                if (featureFabStayHidden) setState('GrokEnhancer_FabHidden', false);
+                fab.style.display = '';
+                logDebug('[FAB] Restored via triple-click');
+            }
+        };
+        document.addEventListener('pointerup', (e) => _ge_tryRestoreAt(e.clientX, e.clientY), true);
+
         document.addEventListener('click', (e) => {
             if (_ge_fabHidden) {
-                // Check if click is in the bottom-right corner (where the FAB would be)
-                const threshold = 60;
-                const inCorner = (window.innerWidth - e.clientX) < threshold && (window.innerHeight - e.clientY) < threshold;
-                if (inCorner) {
-                    const now = Date.now();
-                    _ge_fabClicks.push(now);
-                    _ge_fabClicks = _ge_fabClicks.filter(t => now - t < GE_TRIPLE_CLICK_MS);
-                    if (_ge_fabClicks.length >= 3) {
-                        _ge_fabClicks = [];
-                        _ge_fabHidden = false;
-                        if (featureFabStayHidden) setState('GrokEnhancer_FabHidden', false);
-                        fab.style.display = '';
-                        logDebug('[FAB] Restored via triple-click');
-                    }
-                }
+                _ge_tryRestoreAt(e.clientX, e.clientY);
                 return;
             }
             // Auto-close panel when clicking outside
@@ -3777,21 +4252,40 @@
             }).row;
         });
         section.appendChild(createSection('UI Cleanup', [
-            ge_buildSimpleToggleRow('Hide Share Button'),
-            ge_buildSimpleToggleRow('Hide Popups'),
-            ge_buildSimpleToggleRow('Hide Premium Upsells'),
-            ge_buildSimpleToggleRow('Hide Composer Suggestions'),
-            ge_buildSimpleToggleRow('Hide Private Chat Notice'),
-            ge_buildSimpleToggleRow('Hide Dictation Button'),
-            ge_buildSimpleToggleRow('Hide Voice Mode Button'),
-            followupsRow,
-            createModelDropdown(),
-            ...navHideRows,
+            createSection('Chat & Composer', [
+                ge_buildSimpleToggleRow('Hide Composer Suggestions'),
+                ge_buildSimpleToggleRow('Hide Dictation Button'),
+                ge_buildSimpleToggleRow('Hide Voice Mode Button'),
+                followupsRow,
+                ge_buildSimpleToggleRow('Hide Private Chat Notice'),
+            ]),
+            createSection('Popups & Upsells', [
+                ge_buildSimpleToggleRow('Hide Popups'),
+                ge_buildSimpleToggleRow('Hide Premium Upsells'),
+            ]),
+            createSection('Sidebar & Nav', [
+                createModelDropdown(),
+                ...navHideRows,
+            ]),
+            createSection('Extra', [
+                ge_buildSimpleToggleRow('Hide Share Button'),
+                ge_buildSimpleToggleRow('Hide Post to X Button'),
+                ge_buildSimpleToggleRow('Hide Like Button'),
+                ge_buildSimpleToggleRow('Hide Dislike Button'),
+                ge_buildSimpleToggleRow('Hide Regenerate Button'),
+                ge_buildSimpleToggleRow('Hide More Options Button'),
+                ge_buildSimpleToggleRow('Hide Copy Button'),
+                ge_buildSimpleToggleRow('Hide Thinking/Thoughts'),
+            ]),
         ]));
 
         // ── Privacy ──
         const privacyToggle = createToggle('Privacy Mode', featurePrivacyMode, (on) => {
             ge_requestPrivacyModeChange(on);
+            // One-time notice lives here (panel path) rather than in
+            // ge_setPrivacyMode so a panic-hotkey press never pops a dialog
+            // describing the protections on screen.
+            if (on) ge_openPrivacyNotice();
         });
         privacyToggle.input.id = 'ge-privacy-toggle-input';
         const privacyBadge = document.createElement('span');
@@ -3800,30 +4294,49 @@
         privacyToggle.row.querySelector('.ge-label').appendChild(privacyBadge);
 
         const privacyBlurToggle = createToggle('Blur Chats (instead of hide)', featurePrivacyBlur, (on) => {
-            featurePrivacyBlur = on;
-            setState('GrokEnhancer_PrivacyBlur', on);
-            ge_applyPrivacyCSS(featurePrivacyMode);
-            ge_updatePrivacyBadge();
-            panelAddLog(`Privacy Blur ${on ? 'ON' : 'OFF'}`);
+            const apply = () => {
+                featurePrivacyBlur = on;
+                setState('GrokEnhancer_PrivacyBlur', on);
+                ge_applyPrivacyCSS(featurePrivacyMode);
+                ge_updatePrivacyBadge();
+                panelAddLog(`Privacy Blur ${on ? 'ON' : 'OFF'}`);
+            };
+            if (ge_requestProtectedToggleOff(privacyBlurToggle.input, on, apply, 'Enter PIN to disable Blur Chats')) return;
+            apply();
         });
 
         const hideUsernameToggle = createToggle('Hide Username', featureHideUsername, (on) => {
             featureHideUsername = on;
             setState('GrokEnhancer_HideUsername', on);
             ge_applyFooterPrivacyCSS();
+            ge_maskSettingsIdentity();
             panelAddLog(`Hide Username ${on ? 'ON' : 'OFF'}`);
         });
         const hideEmailToggle = createToggle('Hide Email', featureHideEmail, (on) => {
             featureHideEmail = on;
             setState('GrokEnhancer_HideEmail', on);
             ge_applyFooterPrivacyCSS();
+            ge_maskSettingsIdentity();
             panelAddLog(`Hide Email ${on ? 'ON' : 'OFF'}`);
         });
         const hideAvatarToggle = createToggle('Hide Avatar', featureHideAvatar, (on) => {
             featureHideAvatar = on;
             setState('GrokEnhancer_HideAvatar', on);
             ge_applyFooterPrivacyCSS();
+            ge_maskSettingsIdentity();
             panelAddLog(`Hide Avatar ${on ? 'ON' : 'OFF'}`);
+        });
+        const hideXUsernameToggle = createToggle('Hide X Username', featureHideXUsername, (on) => {
+            featureHideXUsername = on;
+            setState('GrokEnhancer_HideXUsername', on);
+            ge_maskSettingsIdentity();
+            panelAddLog(`Hide X Username ${on ? 'ON' : 'OFF'}`);
+        });
+        const hideBirthYearToggle = createToggle('Hide Birth Year', featureHideBirthYear, (on) => {
+            featureHideBirthYear = on;
+            setState('GrokEnhancer_HideBirthYear', on);
+            ge_maskSettingsIdentity();
+            panelAddLog(`Hide Birth Year ${on ? 'ON' : 'OFF'}`);
         });
 
         const privacyWordsBtn = document.createElement('div');
@@ -3834,7 +4347,10 @@
         const privacyWordsOpenBtn = document.createElement('button');
         privacyWordsOpenBtn.textContent = 'Manage';
         privacyWordsOpenBtn.style.cssText = 'background:#333;color:#aaa;border:none;border-radius:4px;padding:2px 10px;font-size:11px;cursor:pointer;';
-        privacyWordsOpenBtn.addEventListener('click', () => ge_openPrivacyWordsEditor());
+        privacyWordsOpenBtn.addEventListener('click', () => {
+            if (_ge_hasPinSet()) ge_promptPinVerify(() => ge_openPrivacyWordsEditor(), 'Enter PIN to manage privacy words', 'Unlock');
+            else ge_openPrivacyWordsEditor();
+        });
         privacyWordsBtn.appendChild(privacyWordsLabel);
         privacyWordsBtn.appendChild(privacyWordsOpenBtn);
 
@@ -3846,39 +4362,66 @@
         const privacyHotkeyBtn = document.createElement('button');
         privacyHotkeyBtn.textContent = ge_formatHotkey(ge_privacyHotkey);
         privacyHotkeyBtn.style.cssText = 'background:#333;color:#aaa;border:none;border-radius:4px;padding:2px 10px;font-size:11px;cursor:pointer;min-width:90px;';
-        privacyHotkeyBtn.addEventListener('click', () => {
-            privacyHotkeyBtn.textContent = 'Press keys…';
-            const capture = (e) => {
-                if (['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) return; // wait for a real key
-                e.preventDefault();
-                document.removeEventListener('keydown', capture, true);
-                ge_privacyHotkey = { ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, meta: e.metaKey, key: e.key };
+        let ge_pendingHotkeyCapture = null;
+        const ge_cancelHotkeyCapture = () => {
+            if (ge_pendingHotkeyCapture) {
+                document.removeEventListener('keydown', ge_pendingHotkeyCapture, true);
+                ge_pendingHotkeyCapture = null;
+                privacyHotkeyBtn.textContent = ge_formatHotkey(ge_privacyHotkey);
+            }
+        };
+        privacyHotkeyBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            ge_cancelHotkeyCapture(); // drop any previous pending capture
+            privacyHotkeyBtn.textContent = 'Press keys… (Esc cancels)';
+            const capture = (ev) => {
+                if (['Control', 'Shift', 'Alt', 'Meta'].includes(ev.key)) return; // wait for a real key
+                ev.preventDefault();
+                ge_cancelHotkeyCapture();
+                if (ev.key === 'Escape') return;
+                ge_privacyHotkey = { ctrl: ev.ctrlKey, shift: ev.shiftKey, alt: ev.altKey, meta: ev.metaKey, key: ev.key };
                 setState('GrokEnhancer_StreamerHotkey', ge_privacyHotkey);
                 privacyHotkeyBtn.textContent = ge_formatHotkey(ge_privacyHotkey);
             };
+            ge_pendingHotkeyCapture = capture;
             document.addEventListener('keydown', capture, true);
+            // A click outside the panel cancels the capture (the button's own
+            // click is stopPropagation'd above so it can't trigger this).
+            document.addEventListener('click', function ge_cancelOnClickAway() {
+                ge_cancelHotkeyCapture();
+                document.removeEventListener('click', ge_cancelOnClickAway);
+            });
         });
         privacyHotkeyRow.appendChild(privacyHotkeyLabel);
         privacyHotkeyRow.appendChild(privacyHotkeyBtn);
 
         const privacyCategoryRows = Object.keys(GE_PRIVACY_CATEGORIES).map(key => {
             const cat = GE_PRIVACY_CATEGORIES[key];
-            return createToggle(cat.label, ge_isPrivacyCategoryOn(key), (on) => {
-                ge_setPrivacyCategoryOn(key, on);
-                ge_rebuildPrivacyRegex();
-                ge_rescanPrivacyFull();
-                panelAddLog(`Privacy Category "${cat.label}" ${on ? 'ON' : 'OFF'}`);
-            }).row;
+            const toggle = createToggle(cat.label, ge_isPrivacyCategoryOn(key), (on) => {
+                const apply = () => {
+                    ge_setPrivacyCategoryOn(key, on);
+                    ge_rebuildPrivacyRegex();
+                    ge_rescanPrivacyFull();
+                    panelAddLog(`Privacy Category "${cat.label}" ${on ? 'ON' : 'OFF'}`);
+                };
+                if (ge_requestProtectedToggleOff(toggle.input, on, apply, `Enter PIN to disable "${cat.label}"`)) return;
+                apply();
+            });
+            return toggle.row;
         });
         const privacyCategoriesDropdown = createSection('Privacy Categories', privacyCategoryRows);
 
         const autoLockRow = document.createElement('div');
         autoLockRow.className = 'ge-row';
         const autoLockToggle = createToggle('Auto-Lock on Idle', featureAutoLock, (on) => {
-            featureAutoLock = on;
-            setState('GrokEnhancer_AutoLock', on);
-            ge_resetIdleTimer();
-            panelAddLog(`Auto-Lock on Idle ${on ? 'ON' : 'OFF'}`);
+            const apply = () => {
+                featureAutoLock = on;
+                setState('GrokEnhancer_AutoLock', on);
+                ge_resetIdleTimer();
+                panelAddLog(`Auto-Lock on Idle ${on ? 'ON' : 'OFF'}`);
+            };
+            if (ge_requestProtectedToggleOff(autoLockToggle.input, on, apply, 'Enter PIN to disable Auto-Lock')) return;
+            apply();
         });
         const autoLockMinutesInput = document.createElement('input');
         autoLockMinutesInput.type = 'number';
@@ -3914,7 +4457,7 @@
         pinResetBtn.style.cssText = 'background:#333;color:#aaa;border:none;border-radius:4px;padding:2px 10px;font-size:11px;cursor:pointer;';
         pinResetBtn.addEventListener('click', () => {
             const doReset = () => {
-                setState('GrokEnhancer_SettingsPinHash', null);
+                localStorage.removeItem('GrokEnhancer_SettingsPinHash');
                 featurePinLock = false;
                 setState('GrokEnhancer_PinLock', false);
                 panelAddLog('PIN Lock reset');
@@ -3931,9 +4474,13 @@
             ge_buildSimpleToggleRow('Auto Private Chat'),
             privacyToggle.row,
             privacyBlurToggle.row,
-            hideUsernameToggle.row,
-            hideEmailToggle.row,
-            hideAvatarToggle.row,
+            createSection('Identity (Sidebar Footer & Settings)', [
+                hideUsernameToggle.row,
+                hideEmailToggle.row,
+                hideAvatarToggle.row,
+                hideXUsernameToggle.row,
+                hideBirthYearToggle.row,
+            ]),
             privacyWordsBtn,
             privacyHotkeyRow,
             privacyCategoriesDropdown,
@@ -3955,29 +4502,27 @@
         stylesBtn.appendChild(stylesLabel);
         stylesBtn.appendChild(stylesOpenBtn);
 
-        const exportSettingsRow = document.createElement('div');
-        exportSettingsRow.className = 'ge-row';
-        const exportSettingsLabel = document.createElement('span');
-        exportSettingsLabel.className = 'ge-label';
-        exportSettingsLabel.textContent = 'Export Settings';
+        // Import/Export share one row — one click target, both actions.
+        const backupRow = document.createElement('div');
+        backupRow.className = 'ge-row';
+        const backupLabel = document.createElement('span');
+        backupLabel.className = 'ge-label';
+        backupLabel.textContent = 'Backup / Restore';
+        const backupBtnWrap = document.createElement('span');
+        backupBtnWrap.style.cssText = 'display:flex;gap:6px;';
+        const backupBtnCss = 'background:#333;color:#aaa;border:none;border-radius:4px;padding:2px 10px;font-size:11px;cursor:pointer;';
+
         const exportSettingsBtn = document.createElement('button');
         exportSettingsBtn.textContent = 'Export';
-        exportSettingsBtn.style.cssText = 'background:#333;color:#aaa;border:none;border-radius:4px;padding:2px 10px;font-size:11px;cursor:pointer;';
+        exportSettingsBtn.style.cssText = backupBtnCss;
         exportSettingsBtn.addEventListener('click', () => {
             ge_downloadJson(ge_exportAllSettings(), `grok_enhancer_settings_${Date.now()}.json`);
             panelAddLog('Settings exported');
         });
-        exportSettingsRow.appendChild(exportSettingsLabel);
-        exportSettingsRow.appendChild(exportSettingsBtn);
 
-        const importSettingsRow = document.createElement('div');
-        importSettingsRow.className = 'ge-row';
-        const importSettingsLabel = document.createElement('span');
-        importSettingsLabel.className = 'ge-label';
-        importSettingsLabel.textContent = 'Import Settings';
         const importSettingsBtn = document.createElement('button');
         importSettingsBtn.textContent = 'Import';
-        importSettingsBtn.style.cssText = 'background:#333;color:#aaa;border:none;border-radius:4px;padding:2px 10px;font-size:11px;cursor:pointer;';
+        importSettingsBtn.style.cssText = backupBtnCss;
         importSettingsBtn.addEventListener('click', () => {
             const inp = document.createElement('input');
             inp.type = 'file';
@@ -3996,8 +4541,40 @@
             });
             inp.click();
         });
-        importSettingsRow.appendChild(importSettingsLabel);
-        importSettingsRow.appendChild(importSettingsBtn);
+
+        backupBtnWrap.appendChild(exportSettingsBtn);
+        backupBtnWrap.appendChild(importSettingsBtn);
+        backupRow.appendChild(backupLabel);
+        backupRow.appendChild(backupBtnWrap);
+
+        // Theme Schedule — auto Light/Dark switching on a daily clock
+        const themeSchedToggle = createToggle('Auto Switch Theme', !!ge_themeSchedule.enabled, (on) => {
+            ge_themeSchedule.enabled = on;
+            setState('GrokEnhancer_ThemeSchedule', ge_themeSchedule);
+            ge_startThemeScheduler();
+            panelAddLog(`Theme Schedule ${on ? 'ON' : 'OFF'}`);
+        });
+        const ge_themeTimeCss = 'background:#333;color:#aaa;border:none;border-radius:4px;padding:2px 6px;font-size:11px;color-scheme:dark;';
+        const ge_themeTimeRow = (label, key, def) => {
+            const row = document.createElement('div');
+            row.className = 'ge-row';
+            const lbl = document.createElement('span');
+            lbl.className = 'ge-label';
+            lbl.textContent = label;
+            const inp = document.createElement('input');
+            inp.type = 'time';
+            inp.value = ge_themeSchedule[key] || def;
+            inp.style.cssText = ge_themeTimeCss;
+            inp.addEventListener('change', () => {
+                ge_themeSchedule[key] = inp.value || def;
+                setState('GrokEnhancer_ThemeSchedule', ge_themeSchedule);
+                ge_themeTick();
+                panelAddLog(`Theme Schedule: ${label} ${inp.value || def}`);
+            });
+            row.appendChild(lbl);
+            row.appendChild(inp);
+            return row;
+        };
 
         section.appendChild(createSection('Other', [
             ge_buildSimpleToggleRow('Clickable Links'),
@@ -4010,8 +4587,12 @@
             ge_buildSimpleToggleRow('Disable Auto Scroll'),
             ge_buildSimpleToggleRow('Debug'),
             stylesBtn,
-            exportSettingsRow,
-            importSettingsRow,
+            backupRow,
+            createSection('Theme Schedule', [
+                themeSchedToggle.row,
+                ge_themeTimeRow('Light from', 'lightStart', '07:00'),
+                ge_themeTimeRow('Dark from', 'darkStart', '19:00'),
+            ]),
         ]));
         // Prompt Library shortcut — standalone row below the Other section
         section.appendChild(promptsRow);
@@ -4049,6 +4630,37 @@
             if ((_ge_fabEl && !_ge_fabEl.isConnected) || (_ge_panelEl && !_ge_panelEl.isConnected)) {
                 ge_ensureUiMounted();
             }
+            // Privacy fast-pass: mark sensitive nodes synchronously, right here
+            // in the observer callback. MutationObserver fires before paint, so
+            // marked nodes never render unmasked — the 250ms-throttled scan
+            // below used to let chat-list/profile content flash on recordings.
+            if (featurePrivacyMode) {
+                const fastNodes = [];
+                let hasHeading = false;
+                for (const m of mutations) {
+                    for (const added of m.addedNodes) {
+                        if (added.nodeType !== Node.ELEMENT_NODE) continue;
+                        fastNodes.push(added);
+                        if (!hasHeading && (added.tagName === 'H2' || !!added.querySelector?.('h2'))) hasHeading = true;
+                    }
+                }
+                if (fastNodes.length) { try { ge_scanPrivacySensitive(fastNodes); } catch (_) {} }
+                if (hasHeading) { try { ge_maskSettingsIdentity(); } catch (_) {} }
+            }
+            // Model-menu fast-pass: mark hidden models synchronously so they don't
+            // flash for 250 ms while the throttled scan catches up. Only check the
+            // added root nodes themselves; the throttled pass handles nested menus.
+            if (featureHideHeavy || featureHideExpert || featureHideAuto || featureHideFast) {
+                let menuAdded = false;
+                for (const m of mutations) {
+                    for (const added of m.addedNodes) {
+                        if (added.nodeType !== Node.ELEMENT_NODE) continue;
+                        if (added.matches?.('[role="menu"]')) { menuAdded = true; break; }
+                    }
+                    if (menuAdded) break;
+                }
+                if (menuAdded) { try { ge_markModelItems(); ge_markUpgradeHeavyBtns(); } catch (_) {} }
+            }
             for (const m of mutations) {
                 for (const added of m.addedNodes) {
                     if (added.nodeType !== Node.ELEMENT_NODE) continue;
@@ -4083,7 +4695,7 @@
             if (privacyNodes) privacyNodes.push(added);
         }
 
-        if (menuDetected && (featureHideHeavy || featureHideExpert || featureHideAuto)) { ge_markModelItems(); ge_markUpgradeHeavyBtns(); }
+        if (menuDetected && (featureHideHeavy || featureHideExpert || featureHideAuto || featureHideFast)) { ge_markModelItems(); ge_markUpgradeHeavyBtns(); }
         if (hadAdds && featureHidePremium) ge_dismissPremium();
 
         // Mark "Upgrade to Heavy" buttons on each scan pass
@@ -4097,6 +4709,9 @@
 
         // Privacy mode: scan only newly-added nodes, not the whole document
         if (featurePrivacyMode && privacyNodes.length) ge_scanPrivacySensitive(privacyNodes);
+
+        // Settings "Account" dialog identity masking (name/email/avatar/X/birth year)
+        if (featurePrivacyMode) ge_maskSettingsIdentity();
 
         // Debounce popup dismissal (less urgent, 500ms)
         if ((featureHidePopups || featureHidePremium) && !_ge_popupTimer) {
@@ -4880,15 +5495,11 @@
                 if (!featureImagineMenu || !ge_imPersistentPrompt) { clearInterval(_ge_persistentPromptTimer); _ge_persistentPromptTimer = null; }
                 return;
             }
-            const input = document.querySelector('textarea[aria-label="Make a video"]')
-                || document.querySelector('textarea[aria-label="Ask anything"]')
-                || document.querySelector('textarea');
+            const input = ge_findComposer();
             if (!input) return;
-            // If the textarea was cleared but we had a prompt saved, restore it
-            if (!input.value || input.value.trim() === '') {
-                const setter = Object.getOwnPropertyDescriptor(_win.HTMLTextAreaElement.prototype, 'value')?.set;
-                if (setter) { setter.call(input, _ge_lastPromptText); } else { input.value = _ge_lastPromptText; }
-                input.dispatchEvent(new Event('input', { bubbles: true }));
+            // If the composer was cleared but we had a prompt saved, restore it
+            if (!ge_composerText(input).trim()) {
+                ge_setComposerText(input, _ge_lastPromptText);
                 logDebug('[ImagineMenu] Persistent Prompt restored text');
             }
         }, 500);
@@ -4897,11 +5508,10 @@
     // Also save the prompt text whenever the user types (not just on moderation)
     function ge_trackPromptText() {
         if (!ge_imPersistentPrompt) return;
-        const input = document.querySelector('textarea[aria-label="Make a video"]')
-            || document.querySelector('textarea[aria-label="Ask anything"]')
-            || document.querySelector('textarea');
-        if (input && input.value && input.value.trim() !== '') {
-            _ge_lastPromptText = input.value;
+        const input = ge_findComposer();
+        if (input) {
+            const v = ge_composerText(input);
+            if (v.trim() !== '') _ge_lastPromptText = v;
         }
     }
 
@@ -4943,28 +5553,25 @@
         const btn = document.querySelector('button[aria-label="Make video"]')
             || document.querySelector('button[aria-label="Send"]')
             || document.querySelector('button[data-testid="send-button"]');
-        const input = document.querySelector('textarea[aria-label="Make a video"]')
-            || document.querySelector('textarea[aria-label="Ask anything"]')
-            || document.querySelector('textarea');
+        const input = ge_findComposer();
 
         if (!btn || !input) return;
         if (ge_imRetryCount >= ge_imMaxRetries) return;
         if (now - ge_imLastRetryTime < 3000) return;
 
         // Smart Retry: reword the prompt to evade moderation filters
-        if (smartOn && input.value) {
-            const reworded = ge_smartRewritePrompt(input.value, ge_imRetryCount + 1);
-            if (reworded !== input.value) {
-                const setter = Object.getOwnPropertyDescriptor(_win.HTMLTextAreaElement.prototype, 'value')?.set;
-                if (setter) { setter.call(input, reworded); } else { input.value = reworded; }
-                input.dispatchEvent(new Event('input', { bubbles: true }));
+        const curText = ge_composerText(input);
+        if (smartOn && curText) {
+            const reworded = ge_smartRewritePrompt(curText, ge_imRetryCount + 1);
+            if (reworded !== curText) {
+                ge_setComposerText(input, reworded);
                 logDebug('[ImagineMenu] Smart Retry rewrote prompt');
             }
         }
 
         // Persistent Prompt: save the prompt before retry so it can be restored if cleared
-        if (ge_imPersistentPrompt && input.value) {
-            _ge_lastPromptText = input.value;
+        if (ge_imPersistentPrompt && curText) {
+            _ge_lastPromptText = curText;
         }
 
         if (retryOn) {
@@ -5209,6 +5816,7 @@
         }
         if (_ge_autoScrollPatched) return;
         _ge_autoScrollPatched = true;
+        ge_registerUserScrollTrackers();
 
         // Override scrollIntoView to suppress automatic scrolling during message streaming
         _ge_origScrollIntoView = Element.prototype.scrollIntoView;
@@ -5243,7 +5851,10 @@
 
     // Track user scroll actions (only needed while auto-scroll blocking is on)
     let _ge_wheelTimer = null;
-    if (featureDisableAutoScroll && typeof document !== 'undefined') {
+    let _ge_scrollTrackersRegistered = false;
+    function ge_registerUserScrollTrackers() {
+        if (_ge_scrollTrackersRegistered || typeof document === 'undefined') return;
+        _ge_scrollTrackersRegistered = true;
         document.addEventListener('wheel', () => {
             _ge_userScrolling = true;
             clearTimeout(_ge_wheelTimer);
@@ -5255,6 +5866,7 @@
             }
         });
     }
+    if (featureDisableAutoScroll) ge_registerUserScrollTrackers();
 
     async function ge_apiDisableAutoScroll() {
         // Try to update auto-scroll preference via Grok's settings API
@@ -5510,16 +6122,16 @@
 
                 const insertBtn = document.createElement('button');
                 insertBtn.textContent = 'Insert';
-                insertBtn.title = 'Insert into composer';
+                insertBtn.title = 'Insert into the composer now (replaces current text)';
                 insertBtn.style.cssText = primaryCss;
                 insertBtn.addEventListener('click', () => {
                     const ok = ge_insertPromptIntoComposer(p.body || p.text);
-                    if (!ok) alert('No composer textarea found on this page.');
+                    if (!ok) alert('No composer input found on this page.');
                 });
 
                 const useBtn = document.createElement('button');
-                useBtn.textContent = p.id === ge_imActivePromptId ? 'Deselect' : 'Use';
-                useBtn.title = 'Set as active Imagine inject prompt';
+                useBtn.textContent = p.id === ge_imActivePromptId ? 'Deselect' : 'Next Request';
+                useBtn.title = 'Prepends this prompt to your next Imagine request (one-shot, invisible — nothing appears in the composer)';
                 useBtn.style.cssText = p.id === ge_imActivePromptId ? btnCss : primaryCss;
                 useBtn.addEventListener('click', () => {
                     if (ge_imActivePromptId === p.id) {
@@ -5776,7 +6388,7 @@
             css.id = 'ge-im-css';
             css.textContent = `
             #ge-im-fab {
-                position: fixed; bottom: 12px; right: 56px; z-index: 10001;
+                position: fixed; bottom: 12px; right: 56px; z-index: 2147482001;
                 width: 40px; height: 40px; border-radius: 50%; border: none; cursor: pointer;
                 color: #4ade80; background: #111;
                 display: flex; align-items: center; justify-content: center; padding: 0;
@@ -5785,7 +6397,7 @@
             }
             #ge-im-fab:hover { background: #222; box-shadow: 0 2px 8px rgba(74,222,128,0.2); }
             #ge-im-panel {
-                position: fixed; bottom: 52px; right: 56px; z-index: 10000;
+                position: fixed; bottom: 52px; right: 56px; z-index: 2147482000;
                 background: #141414; border: 1px solid #2a2a2a; border-radius: 10px;
                 box-shadow: 0 4px 16px rgba(0,0,0,0.6);
                 display: none; flex-direction: column; gap: 0;
@@ -5995,17 +6607,17 @@
     // ══════════════════════════════════════════════════════════════
     //  7. Initialization
     // ══════════════════════════════════════════════════════════════
-    function applyShareHide(on) {
-        const existingStyle = document.getElementById('ge-share-hide-css');
-        if (on) {
-            if (existingStyle) return;
-            const s = document.createElement('style');
-            s.id = 'ge-share-hide-css';
-            s.textContent = 'button[aria-label="Create share link"] { display: none !important; }';
-            document.head.appendChild(s);
-        } else {
-            if (existingStyle) existingStyle.remove();
-        }
+    function ge_applyExtraCleanupCSS() {
+        const rules = [];
+        if (featureHideShare) rules.push('button[aria-label="Create share link"], button[aria-label="Share"] { display: none !important; }');
+        if (featureHidePostToX) rules.push('button[aria-label="Post to X"] { display: none !important; }');
+        if (featureHideLike) rules.push('button[aria-label="Like"], button[aria-label="Thumbs up"] { display: none !important; }');
+        if (featureHideDislike) rules.push('button[aria-label="Dislike"], button[aria-label="Thumbs down"] { display: none !important; }');
+        if (featureHideRegenerate) rules.push('button[aria-label="Regenerate"] { display: none !important; }');
+        if (featureHideMoreActions) rules.push('button[aria-label="More actions"] { display: none !important; }');
+        if (featureHideCopy) rules.push('button[aria-label="Copy"] { display: none !important; }');
+        if (featureHideThinking) rules.push('.thinking-container { display: none !important; }');
+        ge_applyToggleStyle('ge-extra-cleanup-css', rules.length > 0, rules.join('\n'));
     }
 
     function ge_applyDictationHideCSS(on) {
@@ -6036,6 +6648,31 @@
         }
     }
 
+    // Shift both FABs left on /imagine so they don't cover the native bottom-right
+    // buttons (image gallery / generate / menu). Reverts automatically elsewhere.
+    const GE_IMAGINE_FAB_SHIFT_ID = 'ge-imagine-fab-shift-css';
+    function ge_applyImagineFabShift() {
+        if (typeof rl_isImagine !== 'function') return;
+        const on = rl_isImagine();
+        const existing = document.getElementById(GE_IMAGINE_FAB_SHIFT_ID);
+        if (!on) {
+            if (existing) existing.remove();
+            return;
+        }
+        const css = `
+            #ge-fab { right: 60px !important; }
+            #ge-im-fab { right: 104px !important; }
+        `;
+        if (existing) {
+            if (existing.textContent !== css) existing.textContent = css;
+            return;
+        }
+        const s = document.createElement('style');
+        s.id = GE_IMAGINE_FAB_SHIFT_ID;
+        s.textContent = css;
+        document.head.appendChild(s);
+    }
+
     function init() {
         if (!document.body) {
             const wait = new MutationObserver(() => {
@@ -6045,25 +6682,29 @@
             return;
         }
         try { setupPanel(); } catch (e) { logError('[FAB] setupPanel failed:', e); }
-        applyShareHide(featureHideShare);
+        ge_applyExtraCleanupCSS();
         ge_applyPopupHideCSS(featureHidePopups);
         ge_applyPremiumHideCSS(featureHidePremium);
         ge_applyComposerSuggestionsHideCSS(featureHideComposerSuggestions);
         ge_applyPrivateNoticeHideCSS(featureHidePrivateNotice);
         ge_applyDictationHideCSS(featureHideDictation);
         ge_applyVoiceModeHideCSS(featureHideVoiceMode);
-        ge_applyHideModelsCSS(featureHideHeavy || featureHideExpert || featureHideAuto || featureHideFollowups);
+        if (typeof rl_isImagine === 'function') ge_applyImagineFabShift();
+        ge_applyHideModelsCSS(featureHideHeavy || featureHideExpert || featureHideAuto || featureHideFast || featureHideFollowups);
         ge_applyPrivacyCSS(featurePrivacyMode);
         ge_applyFooterPrivacyCSS();
+        ge_applySettingsPrivacyCSS(featurePrivacyMode);
+        ge_maskSettingsIdentity();
         startContentObserver();
         ge_startUiMountGuard();
         ge_startPrivacyGuardObserver();
         ge_startIdleWatch();
+        ge_startThemeScheduler();
         rl_observeDOM();
         if (featureWeeklyUsage) ge_wuInit();
         if (featureAutoPrivate) ge_autoEnablePrivateMode();
         if (featurePrivacyMode) ge_scanPrivacySensitive();
-        if (featureHideHeavy || featureHideExpert || featureHideAuto) ge_markModelItems();
+        if (featureHideHeavy || featureHideExpert || featureHideAuto || featureHideFast) ge_markModelItems();
         if (featureHideHeavy) ge_markUpgradeHeavyBtns();
         if (featureHideFollowups) ge_markFollowupContainers();
         if (featureHideBuildNav || featureHideImagineNav || featureHideSkillsNav || featureHideAutomationsNav) ge_scanSidebarNavHide();
@@ -6084,7 +6725,7 @@
                 if (Array.isArray(parsed)) ge_savePrompts(parsed.map(ge_normalizePrompt).filter(Boolean));
             }
         } catch (_) {}
-        console.log('[GrokEnhancer] Loaded v2.2.0 — Logo:', featureLogo, '| Links:', featureLinks, '| RateLimit:', featureRateLimit, '| WeeklyUsage:', featureWeeklyUsage, '| Debug:', featureDebug, '| HideShare:', featureHideShare, '| HidePopups:', featureHidePopups, '| HidePremium:', featureHidePremium, '| HideComposerSuggestions:', featureHideComposerSuggestions, '| HideHeavy:', featureHideHeavy, '| HideExpert:', featureHideExpert, '| HideAuto:', featureHideAuto, '| HideFollowups:', featureHideFollowups, '| AutoPrivate:', featureAutoPrivate, '| PrivacyMode:', featurePrivacyMode, '| ImagineMenu:', featureImagineMenu);
+        console.log('[GrokEnhancer] Loaded v2.4.0 — Logo:', featureLogo, '| Links:', featureLinks, '| RateLimit:', featureRateLimit, '| WeeklyUsage:', featureWeeklyUsage, '| Debug:', featureDebug, '| HideShare:', featureHideShare, '| HidePostToX:', featureHidePostToX, '| HideLike:', featureHideLike, '| HideDislike:', featureHideDislike, '| HideRegenerate:', featureHideRegenerate, '| HideMoreActions:', featureHideMoreActions, '| HideCopy:', featureHideCopy, '| HideThinking:', featureHideThinking, '| HidePopups:', featureHidePopups, '| HidePremium:', featureHidePremium, '| HideComposerSuggestions:', featureHideComposerSuggestions, '| HideHeavy:', featureHideHeavy, '| HideExpert:', featureHideExpert, '| HideAuto:', featureHideAuto, '| HideFollowups:', featureHideFollowups, '| AutoPrivate:', featureAutoPrivate, '| PrivacyMode:', featurePrivacyMode, '| ImagineMenu:', featureImagineMenu, '| ThemeSchedule:', !!(ge_themeSchedule && ge_themeSchedule.enabled), '| Mobile:', GE_MOBILE);
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
