@@ -38,7 +38,7 @@ Hides all SuperGrok upgrade prompts and upsell banners across the entire interfa
 
 ---
 
-### 🕑 Message Rate Limit Display
+### 🕑 Rate Limit Display
 
 Injects a live counter into the Grok query bar showing your remaining queries and reset time for the current model. Updates automatically and includes a countdown timer when you're rate limited.
 
@@ -46,13 +46,19 @@ Injects a live counter into the Grok query bar showing your remaining queries an
 
 ### 📊 Weekly Usage Bar
 
-Injects a small usage bar very similar to the one in settings/usage under the composer, it **shows your weekly usage divided by what its being used by, such as chat/grok build/api, ect.**
+Injects a small usage bar very similar to the one in settings/usage under the composer, it **shows your weekly usage divided by what its being used by, such as chat / imagine / grok build / api, ect.**
+
+---
+
+### 🌗 Day/Night Theme Switcher
+
+Allows you to set the times you want day/night mode to enable, as Grok doesnt have this for some reason.
 
 ---
 
 ### 🚫 Hide Popups
 
-Automatically dismisses Grok's satisfaction survey popups, "Think Harder/Quick Response", suggestion popups, and more.
+Automatically dismisses Grok's satisfaction survey popups, "Think Harder/Quick Response", suggestion popups, the "How was your call?" voice-call rating popup, and more.
 
 ---
 
@@ -62,9 +68,9 @@ Hides Grok's suggested follow-up prompt chips so they don't clutter the end of a
 
 ---
 
-### 🏋️ Hide Models (Heavy / Expert / Auto)
+### 🏋️ Hide Models (Heavy / Expert / Auto / Fast)
 
-Hides specific model options from the model selector dropdown. Individually toggle **Heavy**, **Expert**, and **Auto** from a collapsible sub-panel (its trigger shows a live summary, e.g. `Heavy, Auto`, or `None`). CSS-only, zero overhead — only activates when a model menu is open. Hiding Heavy also hides any "Upgrade to Heavy" buttons.
+Hides specific model options from the model selector dropdown. Individually toggle **Heavy**, **Expert**, **Auto**, and **Fast** from a collapsible sub-panel (its trigger shows a live summary, e.g. `Heavy, Auto`, or `None`). CSS-only, zero overhead — only activates when a model menu is open. Hiding Heavy also hides any "Upgrade to Heavy" buttons.
 
 ---
 
@@ -113,13 +119,15 @@ Uses a single pre-compiled regex for performance — no lag even with hundreds o
 
 **Privacy Custom Words** — add your own words/phrases in the settings panel to hide/blur chats matching terms not already covered by the built-in categories.
 
-**Panic Hotkey** — set a keyboard shortcut (default `Ctrl+Shift+H`) that instantly toggles Privacy Mode on or off from anywhere, including while typing in the chat composer. Hidden automatically on mobile, since there's no keyboard to trigger it.
+**Panic Hotkey** — set a keyboard shortcut (default `Ctrl+Shift+H`) that instantly toggles Privacy Mode on or off from anywhere, including while typing in the chat composer. Hidden automatically on mobile, since there's no keyboard to trigger it. If you're inside a chat that matches your privacy settings when it turns on, you're automatically moved to a new chat and the tab title is masked.
 
 **Auto-Lock on Idle** — optionally turns Privacy Mode **on** automatically after a period of no mouse, keyboard, scroll, or tab activity (default 5 minutes, configurable). Useful if you step away from an unlocked machine.
 
-**PIN Lock** — set a 4-digit PIN (in the settings panel) to require it before Privacy Mode can be turned **off**, whether that's via the panel checkbox or the Panic Hotkey. The settings panel itself always opens freely — the PIN only stops someone else from switching Privacy Mode off once it's on. Changing or resetting an existing PIN also requires entering it first. **This is not fullproof, if the script is turned off from the userscript manager it can bypass this, this isnt something that can be changed**
+**PIN Lock** — set a 4-digit PIN (in the settings panel) to require it before Privacy Mode can be turned **off**, whether that's via the panel checkbox or the Panic Hotkey. Once a PIN is set it also protects turning off Auto-Lock on Idle, turning off Blur Chats, opening the Privacy Custom Words manager, and disabling any privacy category. The settings panel itself always opens freely — the PIN only stops someone else from weakening your protections. Changing or resetting an existing PIN also requires entering it first. **This is not foolproof: it's a deterrent against casual snooping, not real encryption, and uninstalling the script from the userscript manager bypasses it entirely.**
 
-**Hide Username / Hide Email / Hide Avatar** — hide your account name, email, and/or profile picture in the sidebar footer. All three default **off** and apply automatically whenever Privacy Mode is enabled, but each can be switched on individually if you want that piece of your identity hidden while Privacy Mode is on.
+**Forgot your PIN?** Clearing site data for grok.com (or deleting the script's `GrokEnhancer_…` localStorage keys in your browser's dev tools) wipes all of the script's settings, including the PIN. If you want to keep your other settings, export them first via **Other → Export Settings** at the bottom of the menu, then re-import after the reset.
+
+**Hide Username / Hide Email / Hide Avatar / Hide X Username / Hide Birth Year** — hide your account name, email, profile picture, linked X handle, and/or birth year. These cover the sidebar footer *and* Grok's settings "Account" panel — in settings they show a "Hidden by Privacy Mode" placeholder instead of going blank, so it's clear why they're missing (hiding the X username also removes its link, so the handle can't leak via hover). All five default **off** and apply automatically whenever Privacy Mode is enabled, but each can be switched on individually.
 
 ---
 
@@ -130,7 +138,7 @@ A dedicated floating panel for Grok's `/imagine` video and image generation — 
 | Option                       | Description                                                                                                                                                           |
 | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Enabled / Disabled**       | Master toggle for all Imagine Menu interception                                                                                                                       |
-| **Extend Video Length Bypass (PATCHED)**      | Bypass the extend-video-length limit (1–30 seconds) — injected into each chat POST request before it's sent                                                           |
+| **Extend Video Length Bypass (PATCHED)** | Bypass the extend-video-length limit (1–30 seconds) — injected into each chat POST request before it's sent                                                           |
 | **Auto-Retry on Moderation** | Automatically re-submits the prompt when Grok flags or blocks a generation                                                                                            |
 | **Smart Retry**              | On each retry, rewrites the prompt using a different obfuscation strategy (leet speak, zero-width character insertion, synonym swaps) to slip past moderation filters |
 | **Persistent Prompt**        | Saves your last prompt before every retry — if Grok clears the input box after a block, the prompt is automatically restored                                          |
