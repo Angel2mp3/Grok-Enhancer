@@ -2,6 +2,32 @@
 
 All notable changes to Grok Enhancer are documented here. This is the first published changelog entry — v1.0 itself was not previously documented.
 
+## [2.4.0] — 2026-07-22
+
+### Added
+- **Theme Schedule**: new panel section that auto-switches Grok between Light and Dark on a daily clock (e.g. Light from 8AM and then Dark from 07:00PM), with overnight ranges supported. Applies via Grok's own Appearance buttons when available; otherwise falls back to a best-effort class/storage switch (Grok's theme persistence isn't public, so the fallback self-corrects on the next full page load if Grok ignores it).
+- **Menu reorganization** - Reorganised the menu again into more sub-dropdowns to make finding things easier.
+- **Mobile detection**: the script now detects coarse-pointer/touch devices once at boot for improved mobile support.
+- **PIN protection for the remaining privacy controls**: when a PIN is set, turning off Auto-Lock on Idle, turning off Blur Chats, opening the Privacy Custom Words manager, and disabling any Privacy Category now require the PIN — same as disabling Privacy Mode or resetting the PIN already did.
+- **First-time privacy notice**: the first time you set a PIN or enable Privacy Mode from the panel, a one-time dialog explains what the protections do (anti-snooping, not encryption) and how to recover from a forgotten PIN.
+- **Panic hotkey auto-switch**: if Privacy Mode turns on while you're inside a chat that matches your privacy words/categories, you're now moved to a new chat instead of just having the entry hidden from the sidebar.
+- **Hide Fast model**: "Fast" joins Heavy, Expert, and Auto in the Hide Models dropdown.
+- **Identity masking in Grok's settings dialog**: Hide Username/Email/Avatar now also apply inside the settings "Account" panel — shown as a "Hidden by Privacy Mode" placeholder, plus two new options: **Hide X Username** (also strips the link so the handle can't leak via hover) and **Hide Birth Year**.
+- **Hide Popups** now also hides the "How was your call?" voice-call rating popup.
+
+### Fixed
+- **Prompt Library insertion on desktop**
+- **Hidden menu won't come back on mobile**: the triple-tap restore zone was hardcoded to 60px from the bottom-right corner, but on mobile the menu button sits ~80px higher (safe-area offset), so tapping "the same spot" never counted. Restore now tests against the button's actual last position, listens to `pointerup` in capture phase (rapid taps were being swallowed as double-tap-zoom), and allows a wider tap window on mobile.
+- **Usage bar stuck orange / not loading on mobile**: the rate-limit badge's orange was the API-error fallback (`/rest/rate-limits` failing on mobile networks). The fallback is now neutral gray and retries automatically in the background; the weekly usage strip also retries a failed first load instead of waiting up to 5 minutes.
+- **Auto-Lock on idle on mobile**: touch activity (`touchstart`/`touchmove`/`pointerdown`) now counts as activity, and returning to a backgrounded tab locks immediately if the idle threshold already elapsed — mobile browsers suspend timers in background tabs, which previously cancelled the lock entirely.
+- **Privacy masking flash**: sensitive chat names and profile/settings identity could paint unmasked for ~250ms (long enough to be caught in a screen recording) because masking ran inside a throttled scan. Privacy marking now runs synchronously in the mutation observer — before the browser paints — and privacy CSS is injected at document-start instead of after `<body>` exists.
+- **Tab title leak**: after triggering Privacy Mode / Panic Hotkey in a sensitive chat, it failed to do anything, now instead if the chat open matches that, it immediately switches to a new chat, so the result is the title of the chat in the browser tab is not longer there, and the current chat messages are not longer on screen, which is far better than before.
+- **General bugs and issues fixed**
+
+### Changed
+- **Import/Export merged**: the two separate settings rows are now a single "Backup / Restore" row with Export and Import buttons side by side.
+- **Panic hotkey skipped on mobile**: no physical keyboard, and the hotkey row was already hidden there.
+
 ## [2.2.0] — 2026-07-17
 
 ### Added
