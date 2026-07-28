@@ -2,6 +2,16 @@
 
 All notable changes to Grok Enhancer are documented here. This is the first published changelog entry — v1.0 itself was not previously documented.
 
+## [2.4.5] Hotfix — 2026-07-28
+
+### Added:
+- New options to hide more sidebar buttons: Search and Projects, including the mini versions of them for when the sidebar is minimized.
+- Dropdown "Extra" under UI Cleanup, includes the following new options: Hide post to X, Hide like button, Hide dislike button, Hide regenerate button, Hide more options button, Hide copy button, and Hide Thinking/Thoughts.
+
+### Fixed:
+- Bugs and perfomance issues fixed
+- Hiding of sidebar options wasnt always applied to when the sidebar was minimized.
+
 ## [2.4.0] — 2026-07-22
 
 ### Added
