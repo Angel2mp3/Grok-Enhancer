@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Enhancer
 // @namespace    https://grok.com/
-// @version      2.4.0
+// @version      2.4.5
 // @description  All-in-one Grok enhancement
 // @author       Angel
 // @homepageURL  https://angelmakes.software/
@@ -106,7 +106,7 @@
             if (v === null) return def;
             if (v === 'true') return true;
             if (v === 'false') return false;
-            return JSON.parse(v);
+            try { return JSON.parse(v); } catch (_) { return v; }
         } catch (_) { return def; }
     }
 
@@ -125,6 +125,25 @@
             return !!(coarse && (navigator.maxTouchPoints > 0 || /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent)));
         } catch (_) { return false; }
     })();
+
+    // ── Resource cleanup registry ─────────────────────────────────
+    // Features that spawn timers or MutationObservers register them here so
+    // they can be torn down when the feature is turned off or the page hides.
+    const _ge_cleanupRegistry = new Map();
+
+    function ge_registerCleanup(featureName, cleanupFn) {
+        if (!_ge_cleanupRegistry.has(featureName)) _ge_cleanupRegistry.set(featureName, []);
+        _ge_cleanupRegistry.get(featureName).push(cleanupFn);
+    }
+
+    function ge_runCleanup(featureName) {
+        const list = _ge_cleanupRegistry.get(featureName);
+        if (!list) return;
+        while (list.length) {
+            const fn = list.shift();
+            try { fn(); } catch (_) {}
+        }
+    }
 
     let featureLogo        = getState('GrokEnhancer_Logo', false);
     let featureLinks       = getState('GrokEnhancer_Links', false);
@@ -145,6 +164,8 @@
     let featureHideImagineNav = getState('GrokEnhancer_HideImagineNav', false);
     let featureHideSkillsNav = getState('GrokEnhancer_HideSkillsNav', false);
     let featureHideAutomationsNav = getState('GrokEnhancer_HideAutomationsNav', false);
+    let featureHideSearchNav = getState('GrokEnhancer_HideSearchNav', false);
+    let featureHideProjectsNav = getState('GrokEnhancer_HideProjectsNav', false);
     let featureHidePrivateNotice = getState('GrokEnhancer_HidePrivateNotice', false);
     let featureHideDictation = getState('GrokEnhancer_HideDictation', false);
     let featureHideVoiceMode = getState('GrokEnhancer_HideVoiceMode', false);
@@ -154,6 +175,7 @@
     let featureHideMoreActions = getState('GrokEnhancer_HideMoreActions', false);
     let featureHideCopy = getState('GrokEnhancer_HideCopy', false);
     let featureHideThinking = getState('GrokEnhancer_HideThinking', false);
+    let featureHideMiniHistory = getState('GrokEnhancer_HideMiniHistory', false);
     let featureAutoPrivate = getState('GrokEnhancer_AutoPrivate', false);
     let featurePrivacyMode    = getState('GrokEnhancer_Streamer', false);
     let featurePrivacyBlur    = getState('GrokEnhancer_PrivacyBlur', false);
@@ -288,16 +310,23 @@
             const r = el.getBoundingClientRect();
             return r.width > 0 && r.height > 0;
         };
-        const candidates = [
-            ...document.querySelectorAll('.query-bar div[contenteditable="true"]'),
-            ...document.querySelectorAll('div[contenteditable="true"]'),
-            ...document.querySelectorAll('textarea[aria-label*="Ask"]'),
-            ...document.querySelectorAll('textarea[aria-label="Make a video"]'),
-            ...document.querySelectorAll('form textarea'),
-            ...document.querySelectorAll('main textarea'),
-            ...document.querySelectorAll('textarea'),
+        // Search sequentially by specificity, returning the first visible match.
+        // This avoids building a giant array and querying broad selectors when the
+        // common case already finds the composer.
+        const selectors = [
+            '.query-bar div[contenteditable="true"]',
+            'textarea[aria-label*="Ask"]',
+            'textarea[aria-label="Make a video"]',
+            'form textarea',
+            'main textarea',
+            'div[contenteditable="true"]',
+            'textarea',
         ];
-        for (const el of candidates) { if (visible(el)) return el; }
+        for (const selector of selectors) {
+            for (const el of document.querySelectorAll(selector)) {
+                if (visible(el)) return el;
+            }
+        }
         return null;
     }
 
@@ -481,10 +510,19 @@
     let _logoSvgObserver = null;
 
     let lastUrl = location.href;
+    let _ge_urlChangeRaf = null;
+    let _ge_urlChangePending = false;
     const _ge_urlChangeObserver = new MutationObserver(() => {
-        if (location.href !== lastUrl) {
-            lastUrl = location.href;
-            logoReplaced = false;
+        if (location.href === lastUrl) return;
+        lastUrl = location.href;
+        logoReplaced = false;
+        if (_ge_urlChangePending) {
+            if (_ge_urlChangeRaf) cancelAnimationFrame(_ge_urlChangeRaf);
+        }
+        _ge_urlChangePending = true;
+        _ge_urlChangeRaf = requestAnimationFrame(() => {
+            _ge_urlChangePending = false;
+            _ge_urlChangeRaf = null;
             // Re-try the logo swap on navigation (with a few delayed retries for
             // late-rendering SPA routes) instead of rescanning every mutation batch.
             if (featureLogo) {
@@ -499,7 +537,7 @@
                 ge_rescanPrivacyFull();
             }
             if (typeof rl_isImagine === 'function') ge_applyImagineFabShift();
-        }
+        });
     });
     _ge_urlChangeObserver.observe(document, { subtree: true, childList: true });
 
@@ -545,7 +583,7 @@
     // ══════════════════════════════════════════════════════════════
     //  2. Clickable Links
     // ══════════════════════════════════════════════════════════════
-    const SCAN_RE = /(?<![a-zA-Z0-9.@])@([A-Za-z0-9_]{1,15})\b|https?:\/\/[^\s<>"'`\])\}]+|\bwww\.[a-zA-Z0-9\-]+\.[^\s<>"'`\])\}]+|\b(?:[a-zA-Z0-9\-]+\.)+(?:com|org|net|io|dev|app|co|ai|gov|edu|me|info|xyz|biz|name|mobi|pro|tel|jobs|museum|coop|aero|int|travel|post|tech|software|online|site|website|store|shop|blog|cloud|digital|media|network|solutions|services|company|agency|studio|design|systems|consulting|management|marketing|finance|health|care|technology|tools|space|zone|world|life|live|social|community|group|team|global|business|professional|expert|plus|city|land|today|news|press|review|guide|support|help|training|education|academy|institute|center|foundation|ventures|capital|partners|holdings|works|build|engineering|energy|eco|farm|food|restaurant|bar|hotel|tours|rentals|properties|estate|homes|auto|cars|sports|fitness|art|gallery|photography|video|music|show|film|events|party|fun|games|game|play|dating|love|wedding|family|kids|pet|clinic|dental|doctor|pharmacy|insurance|loans|credit|bank|money|pay|law|attorney|legal|security|repair|cleaning|run|link|click|host|page|web|email|uk|ca|au|de|fr|jp|ru|br|in|it|es|nl|se|no|fi|dk|pl|pt|be|ch|at|nz|mx|ar|sg|hk|tw|kr|za|ie|cz|hu|ro|gr|th|vn|ph|id|my|ng|ke|gg|re|tv|cc|so|is|ee|lv|lt|sk|si|hr|rs|bg|mk|al|ba|md|ge|am|az|by|kz|ua|uz|mn|af|pk|bd|lk|np|mm|kh|la|bn|pg|fj|ws|to|vu|ki|fm|pw|mh|nr|sb|eu|us|gb|il|tr|sa|ae|eg|ma|li|lu|mo|mt|cy|gh|tz|sn|cm|ao|zw|mu|bw|na|ls|sz|rw|sd|ly|dz|cd|ga|gq|cv|sl|lr|gn|bf|ml|gm|mz|sc|sh|je|im|gi|gt|bz|sv|hn|ni|cr|pa|pe|cl|bo|uy|py|ec|tt|jm|cu|do|ht|dm|bb|lc|vc|gd|ag|kn|pr|vi|ky|bm|aw|gp|mq|nc|pf|as|gu|ck|nu|tk|nf|cx|sj|gl|pm|yt|ax|fo)(?:\/[^\s<>"'`\])\}]*)?\b/gi;
+    const SCAN_RE = /(?<![a-zA-Z0-9.@])@([A-Za-z0-9_]{1,15})\b|https?:\/\/[^\s<>"'`\)\}]+|\bwww\.[a-zA-Z0-9\-]+\.[^\s<>"'`\)\}]+|\b(?:[a-zA-Z0-9\-]+\.)+(?:com|org|net|io|dev|app|co|ai|gov|edu|me|info|xyz|biz|name|mobi|pro|tel|jobs|museum|coop|aero|int|travel|post|tech|software|online|site|website|store|shop|blog|cloud|digital|media|network|solutions|services|company|agency|studio|design|systems|consulting|management|marketing|finance|health|care|technology|tools|space|zone|world|life|live|social|community|group|team|global|business|professional|expert|plus|city|land|today|news|press|review|guide|support|help|training|education|academy|institute|center|foundation|ventures|capital|partners|holdings|works|build|engineering|energy|eco|farm|food|restaurant|bar|hotel|tours|rentals|properties|estate|homes|auto|cars|sports|fitness|art|gallery|photography|video|music|show|film|events|party|fun|games|game|play|dating|love|wedding|family|kids|pet|clinic|dental|doctor|pharmacy|insurance|loans|credit|bank|money|pay|law|attorney|legal|security|repair|cleaning|run|link|click|host|page|web|email|uk|ca|au|de|fr|jp|ru|br|in|it|es|nl|se|no|fi|dk|pl|pt|be|ch|at|nz|mx|ar|sg|hk|tw|kr|za|ie|cz|hu|ro|gr|th|vn|ph|id|my|ng)(?:\/[^\s<>"'`\)\}]*)?\b/gi;
 
     // Platform context detection for @mention link routing
     const PLATFORM_PATTERNS = [
@@ -576,6 +614,13 @@
         { re: /\b(x\.com|twitter|tweet|retweet|x account|on x)\b/i, url: u => `https://x.com/${u}` },
     ];
 
+    // Compile each platform's regex once at module load — getMentionHref() can fire
+    // thousands of times per linkified scan (large replies have many mentions), so
+    // per-call `new RegExp(...)` work would dominate the hot path.
+    for (const p of PLATFORM_PATTERNS) {
+        p.regex = new RegExp(p.re.source, 'gi');
+    }
+
     function getMentionHref(user, text, start, textNode) {
         const WIN = 150;
         const mentionStr = '@' + user;
@@ -601,8 +646,10 @@
         let bestPlatform = null;
         let bestDist     = Infinity;
 
+        // Walk precompiled PLATFORM_PATTERNS regexes (compiled once at module load).
         for (const p of PLATFORM_PATTERNS) {
-            const re = new RegExp(p.re.source, 'gi');
+            const re = p.regex;
+            re.lastIndex = 0;
             let m;
             while ((m = re.exec(win)) !== null) {
                 const kwEnd = m.index + m[0].length;
@@ -620,8 +667,14 @@
         'A', 'SCRIPT', 'STYLE', 'CODE', 'PRE', 'TEXTAREA', 'INPUT', 'SELECT',
         'BUTTON', 'NOSCRIPT', 'IFRAME', 'OBJECT', 'SVG',
     ]);
-    const PROCESSED_ATTR = 'data-linkified';
-
+    // Linkify URLs and @mentions in text nodes. We intentionally avoid
+    // marking whole parent subtrees as "processed" because Grok can append
+    // new text into an existing message container; marking the parent would
+    // prevent those newly added text nodes from being linkified. The trade-off
+    // is that text is re-scanned on each mutation, but already-linkified text
+    // lives inside <a> tags which SKIP_TAGS rejects, so no double-linking.
+    // TODO: If re-scanning becomes a performance issue on very long chats,
+    // consider a per-text-node marker (e.g., WeakSet or wrapping spans).
     function linkifyNode(root) {
         if (!featureLinks) return;
         const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
@@ -629,7 +682,6 @@
                 let el = node.parentElement;
                 while (el) {
                     if (SKIP_TAGS.has(el.tagName)) return NodeFilter.FILTER_REJECT;
-                    if (el.hasAttribute(PROCESSED_ATTR)) return NodeFilter.FILTER_REJECT;
                     el = el.parentElement;
                 }
                 if (!node.nodeValue || node.nodeValue.trim().length < 4) return NodeFilter.FILTER_SKIP;
@@ -665,8 +717,6 @@
                 lastIndex = start + full.length;
             }
             if (lastIndex < text.length) frag.appendChild(document.createTextNode(text.slice(lastIndex)));
-            const parent = textNode.parentElement;
-            if (parent) parent.setAttribute(PROCESSED_ATTR, '1');
             textNode.parentNode.replaceChild(frag, textNode);
         }
     }
@@ -689,40 +739,33 @@
         const isRateLimitTrackable = method === 'POST' &&
             (url.includes('/rest/app-chat/conversations/new') || (url.includes('/responses') && url.includes('/rest/app-chat/conversations/')));
         let rl_pendingModel = null;
-        if (featureRateLimit && isRateLimitTrackable) {
+
+        // Read the body once for chat endpoints so every feature below can
+        // inspect/rewrite it without cloning the Request repeatedly.
+        let chatBodyText = null;
+        let chatBodyJson = null;
+        if (isChatPost || isRateLimitTrackable) {
             try {
-                let rlBodyText = null;
-                if (typeof requestArgs.body === 'string') rlBodyText = requestArgs.body;
-                else if (isReqObj) { const rlClone = input.clone(); rlBodyText = await rlClone.text(); }
-                if (rlBodyText) rl_pendingModel = rl_getModelFromBody(JSON.parse(rlBodyText));
+                chatBodyText = await ge_readRequestBody(input, requestArgs, isReqObj);
+                if (chatBodyText) chatBodyJson = JSON.parse(chatBodyText);
             } catch (_) {}
         }
-        if (ge_activeStyleId && isChatPost) {
+
+        if (featureRateLimit && isRateLimitTrackable && chatBodyJson) {
+            try {
+                rl_pendingModel = rl_getModelFromBody(chatBodyJson);
+            } catch (_) {}
+        }
+        let requestModified = false;
+        if (ge_activeStyleId && isChatPost && chatBodyJson) {
             try {
                 const styles = ge_getCustomStyles();
                 const activeStyle = styles.find(s => s.id === ge_activeStyleId);
                 if (activeStyle) {
-                    let bodyText = null;
-                    if (typeof requestArgs.body === 'string') {
-                        bodyText = requestArgs.body;
-                    } else if (isReqObj) {
-                        const cloned = input.clone();
-                        bodyText = await cloned.text();
-                    }
-                    if (bodyText) {
-                        const json = JSON.parse(bodyText);
-                        // Find the user message field and prepend style instructions
-                        const msgKey = ['message', 'content', 'text', 'prompt'].find(k => typeof json[k] === 'string');
-                        if (msgKey) {
-                            json[msgKey] = '[Follow these response-style instructions for this and all subsequent replies in this conversation: ' + activeStyle.instructions + ']\n\n' + json[msgKey];
-                        }
-                        const newBody = JSON.stringify(json);
-                        if (isReqObj) {
-                            input = new Request(input, { body: newBody });
-                            requestArgs = init || {};
-                        } else {
-                            requestArgs = { ...requestArgs, body: newBody };
-                        }
+                    const msgKey = ['message', 'content', 'text', 'prompt'].find(k => typeof chatBodyJson[k] === 'string');
+                    if (msgKey) {
+                        chatBodyJson[msgKey] = '[Follow these response-style instructions for this and all subsequent replies in this conversation: ' + activeStyle.instructions + ']' + '\n\n' + chatBodyJson[msgKey];
+                        requestModified = true;
                         logDebug('[CustomStyle] Injected "' + activeStyle.name + '" into ' + url);
                     }
                 }
@@ -732,55 +775,52 @@
         }
 
         // ── Imagine Menu: Video length override + prompt inject ──
-        if (featureImagineMenu && ge_imInterceptOn && isChatPost) {
+        if (featureImagineMenu && ge_imInterceptOn && isChatPost && chatBodyJson) {
             try {
-                const bodyText2 = await ge_readRequestBody(input, requestArgs, isReqObj);
-                if (bodyText2) {
-                    const json2 = JSON.parse(bodyText2);
-                    let bodyChanged = false;
-                    const videoTouched = ge_imApplyVideoLength(json2, ge_imVideoLength);
-                    if (videoTouched.applied) {
-                        ge_imInterceptCount++;
-                        ge_imLastLengthPath = videoTouched.path;
-                        ge_imLastLengthForced = !!videoTouched.forced;
-                        logDebug(`[ImagineMenu] Video length ${videoTouched.oldVal ?? 'default'} → ${ge_imVideoLength} via ${videoTouched.path}${videoTouched.forced ? ' (forced/maybe-patched)' : ''} (#${ge_imInterceptCount})`);
-                        bodyChanged = true;
-                        ge_updateImStatus();
-                    } else if (videoTouched.looksLikeVideo) {
-                        logDebug('[ImagineMenu] Video request, no length field. Keys:', Object.keys(json2));
-                        ge_imLastVideoMiss = true;
-                        ge_imLastLengthPath = null;
-                        ge_imLastLengthForced = false;
-                        ge_updateImStatus();
-                    }
-                    if (ge_imActivePromptId) {
-                        const prompts = ge_getPrompts();
-                        const ap = prompts.find(p => p.id === ge_imActivePromptId);
-                        const apText = ap && (ap.text || ap.body);
-                        if (ap && apText) {
-                            const msgK = ['message', 'content', 'text', 'prompt'].find(k => typeof json2[k] === 'string');
-                            if (msgK && !json2[msgK].includes(apText)) {
-                                json2[msgK] = apText + '\n\n' + json2[msgK];
-                                logDebug('[ImagineMenu] Injected prompt:', ap.title || ap.name);
-                                bodyChanged = true;
-                            }
-                            if (!ge_imAutoRetry) {
-                                ge_imActivePromptId = null;
-                                setState('GrokEnhancer_ActivePromptId', null);
-                                ge_updateImActiveLabel();
-                            }
+                const videoTouched = ge_imApplyVideoLength(chatBodyJson, ge_imVideoLength);
+                if (videoTouched.applied) {
+                    ge_imInterceptCount++;
+                    ge_imLastLengthPath = videoTouched.path;
+                    ge_imLastLengthForced = !!videoTouched.forced;
+                    logDebug(`[ImagineMenu] Video length ${videoTouched.oldVal ?? 'default'} → ${ge_imVideoLength} via ${videoTouched.path}${videoTouched.forced ? ' (forced/maybe-patched)' : ''} (#${ge_imInterceptCount})`);
+                    requestModified = true;
+                    ge_updateImStatus();
+                } else if (videoTouched.looksLikeVideo) {
+                    logDebug('[ImagineMenu] Video request, no length field. Keys:', Object.keys(chatBodyJson));
+                    ge_imLastVideoMiss = true;
+                    ge_imLastLengthPath = null;
+                    ge_imLastLengthForced = false;
+                    ge_updateImStatus();
+                }
+                if (ge_imActivePromptId) {
+                    const prompts = ge_getPrompts();
+                    const ap = prompts.find(p => p.id === ge_imActivePromptId);
+                    const apText = ap && (ap.text || ap.body);
+                    if (ap && apText) {
+                        const msgK = ['message', 'content', 'text', 'prompt'].find(k => typeof chatBodyJson[k] === 'string');
+                        if (msgK && !chatBodyJson[msgK].includes(apText)) {
+                            chatBodyJson[msgK] = apText + '\n\n' + chatBodyJson[msgK];
+                            logDebug('[ImagineMenu] Injected prompt:', ap.title || ap.name);
+                            requestModified = true;
                         }
-                    }
-                    if (bodyChanged) {
-                        const nb = JSON.stringify(json2);
-                        const next = ge_withNewBody(input, init, requestArgs, isReqObj, nb);
-                        input = next.input;
-                        requestArgs = next.requestArgs;
+                        if (!ge_imAutoRetry) {
+                            ge_imActivePromptId = null;
+                            setState('GrokEnhancer_ActivePromptId', null);
+                            ge_updateImActiveLabel();
+                        }
                     }
                 }
             } catch (err2) {
                 console.warn('[GrokEnhancer] ImagineMenu intercept error:', err2);
             }
+        }
+
+        // Write the (possibly modified) chat body back to the outgoing request once.
+        if (requestModified && chatBodyJson) {
+            const newBody = JSON.stringify(chatBodyJson);
+            const next = ge_withNewBody(input, init, requestArgs, isReqObj, newBody);
+            input = next.input;
+            requestArgs = next.requestArgs;
         }
 
         // ── Media API intercept for downloader database ──
@@ -1037,31 +1077,119 @@
     }
 
     // ══════════════════════════════════════════════════════════════
-    //  3c3. Hide Sidebar Nav Items (Build / Imagine / Skills and Connectors / Automations)
+    //  3c3. Hide Sidebar Nav Items (Build / Imagine / Skills / Automations / Search / Projects)
     // ══════════════════════════════════════════════════════════════
-    // Matched by visible label text rather than href — Build's href isn't confirmed
-    // from the reference markup, and text-matching keeps Imagine/Skills-and-Connectors
-    // working even if Grok changes their routes.
+    // Each entry defines an aria-label, visible-text, and href fallback so the
+    // matches survive Grok's collapse-button-only sidebar state (which omits the
+    // <span class="whitespace-nowrap">Label</span> inner span). Search is a
+    // <button>, the rest are <a>s — both are caught by the same matcher.
+    // `isGroup: true` (Projects) hides the parent [data-sidebar="group"] so its
+    // title row and sub-list are removed together. Other items hide just the
+    // surrounding menu-item <li> in both large and small sidebar states.
     const GE_SIDEBAR_NAV_HIDE_ITEMS = [
-        { key: 'build', label: 'Build', get: () => featureHideBuildNav },
-        { key: 'imagine', label: 'Imagine', get: () => featureHideImagineNav },
-        { key: 'skills', label: 'Skills and Connectors', get: () => featureHideSkillsNav },
-        { key: 'automations', label: 'Automations', get: () => featureHideAutomationsNav },
+        {
+            key: 'search', label: 'Search',
+            match: { text: 'Search', aria: 'Search', href: null },
+            isGroup: false,
+            get: () => featureHideSearchNav,
+            set: v => { featureHideSearchNav = v; },
+            storageKey: 'GrokEnhancer_HideSearchNav',
+        },
+        {
+            key: 'projects', label: 'Projects',
+            match: { text: 'Projects', aria: 'Projects', href: '/project' },
+            isGroup: true,
+            get: () => featureHideProjectsNav,
+            set: v => { featureHideProjectsNav = v; },
+            storageKey: 'GrokEnhancer_HideProjectsNav',
+        },
+        {
+            key: 'build', label: 'Build',
+            match: { text: 'Build', aria: 'Build', href: '/build' },
+            isGroup: false,
+            get: () => featureHideBuildNav,
+            set: v => { featureHideBuildNav = v; },
+            storageKey: 'GrokEnhancer_HideBuildNav',
+        },
+        {
+            key: 'imagine', label: 'Imagine',
+            match: { text: 'Imagine', aria: 'Imagine', href: '/imagine' },
+            isGroup: false,
+            get: () => featureHideImagineNav,
+            set: v => { featureHideImagineNav = v; },
+            storageKey: 'GrokEnhancer_HideImagineNav',
+        },
+        {
+            key: 'skills', label: 'Skills and Connectors',
+            match: { text: 'Skills and Connectors', aria: 'Skills and Connectors', href: '/skills-and-connectors' },
+            isGroup: false,
+            get: () => featureHideSkillsNav,
+            set: v => { featureHideSkillsNav = v; },
+            storageKey: 'GrokEnhancer_HideSkillsNav',
+        },
+        {
+            key: 'automations', label: 'Automations',
+            match: { text: 'Automations', aria: 'Automations', href: '/automations' },
+            isGroup: false,
+            get: () => featureHideAutomationsNav,
+            set: v => { featureHideAutomationsNav = v; },
+            storageKey: 'GrokEnhancer_HideAutomationsNav',
+        },
     ];
 
+    // Returns true when an arbitrary sidebar element matches one of our hide items.
+    // Order matters: aria first (covers Search buttons + Projects title button),
+    // then visible span text (large versions of Build / Imagine / Skills / Automations),
+    // then href (the small/collapsed sidebar icon-only links).
+    // The chevron toggle button (aria "Projects — toggle") is excluded from
+    // Projects so only the canonical title gets hidden via isGroup.
+    function _geNavItemMatches(el, item) {
+        const aria = (el.getAttribute('aria-label') || '').trim();
+        // Skip "Projects — toggle" / "X — toggle" chevron-only buttons so we
+        // hide the title once, not twice (once per chevron sub-handle).
+        if (item.isGroup && /[-\u2013\u2014]\s*toggle$/i.test(aria)) return false;
+        if (item.match.aria && aria === item.match.aria) return true;
+        if (item.match.text) {
+            const span = el.querySelector('span.whitespace-nowrap') || el.querySelector('span.text-xs.font-semibold');
+            const text = span ? (span.textContent || '').trim() : '';
+            if (text === item.match.text) return true;
+        }
+        if (item.match.href) {
+            const href = (el.getAttribute('href') || '').trim();
+            if (href === item.match.href || href.startsWith(item.match.href + '/')) return true;
+        }
+        return false;
+    }
+
     function ge_scanSidebarNavHide() {
-        const anyOn = GE_SIDEBAR_NAV_HIDE_ITEMS.some(i => i.get());
-        ge_applyToggleStyle('ge-navhide-css', anyOn, '[data-ge-navhide] { display: none !important; }');
+        const active = GE_SIDEBAR_NAV_HIDE_ITEMS.filter(i => i.get());
+        // Always reset markers so a recently-disabled toggle doesn't keep its hide tag.
         document.querySelectorAll('[data-ge-navhide]').forEach(el => el.removeAttribute('data-ge-navhide'));
-        if (!anyOn) return;
-        document.querySelectorAll('[data-sidebar="menu-item"] a[data-sidebar="menu-button"]').forEach(link => {
-            const span = link.querySelector('span.whitespace-nowrap');
-            const text = span ? span.textContent.trim() : link.textContent.trim();
-            const match = GE_SIDEBAR_NAV_HIDE_ITEMS.find(i => i.get() && i.label === text);
-            if (!match) return;
-            const target = link.closest('[data-sidebar="group"]') || link.closest('[data-sidebar="menu-item"]');
-            if (target) target.setAttribute('data-ge-navhide', '1');
-        });
+        if (!active.length) {
+            ge_applyToggleStyle('ge-navhide-css', false, '');
+            return;
+        }
+        ge_applyToggleStyle('ge-navhide-css', true, '[data-ge-navhide] { display: none !important; }');
+
+        // Collect every candidate: standard menu-buttons inside menu-items (covers
+        // BOTH large and small versions of every item — Search, Build, Imagine,
+        // Skills, Automations, and the small Projects link), PLUS header buttons
+        // sitting anywhere inside a [data-sidebar="group"] (covers the LARGE
+        // Projects title row, which lives outside any menu-item).
+        const candidates = document.querySelectorAll(
+            '[data-sidebar="menu-item"] [data-sidebar="menu-button"],' +
+            ' [data-sidebar="group"] button[aria-label]'
+        );
+
+        for (const el of candidates) {
+            if (el.closest('[data-ge-navhide]')) continue; // already hidden by a sibling/ancestor
+            const item = active.find(i => _geNavItemMatches(el, i));
+            if (!item) continue;
+            const target = item.isGroup
+                ? (el.closest('[data-sidebar="group"]') || el)
+                : (el.closest('li[data-sidebar="menu-item"]') || el);
+            if (target && !target.hasAttribute('data-ge-navhide')) target.setAttribute('data-ge-navhide', '1');
+        }
     }
 
     // ══════════════════════════════════════════════════════════════
@@ -1127,13 +1255,17 @@
         if (featureHideAuto) active.push(['Auto', 'model-auto']);
         if (featureHideFast) active.push(['Fast', 'model-fast']);
         if (active.length === 0) return;
+        // Precompile one regex per active model name — the previous code built
+        // a new RegExp() inside the per-item × per-name loops, which fires
+        // O(items * names) compilations on every scan pass for an open menu.
+        const compiled = active.map(([name, attr]) => [new RegExp('^' + name + '$', 'i'), attr]);
         for (const menu of document.querySelectorAll('[role="menu"]')) {
             for (const item of menu.querySelectorAll('[role="menuitem"]')) {
                 const span = item.querySelector('span.font-semibold');
                 if (!span) continue;
                 const text = span.textContent.trim();
-                for (const [name, attr] of active) {
-                    if (new RegExp('^' + name + '$', 'i').test(text)) {
+                for (const [re, attr] of compiled) {
+                    if (re.test(text)) {
                         item.setAttribute('data-ge-hidden', attr);
                         break;
                     }
@@ -1577,6 +1709,7 @@
     // when Privacy Mode is off, upgrade to a scoped observer if this proves too broad.
     let _ge_privacyGuardTimer = null;
     function ge_startPrivacyGuardObserver() {
+        ge_runCleanup('PrivacyGuard');
         const guard = new MutationObserver((mutations) => {
             if (!featurePrivacyMode) return;
             // Only react when a node that's supposed to carry our marker has lost it
@@ -1761,10 +1894,13 @@
     function ge_themeScheduleNext() {
         clearTimeout(_ge_themeTimer);
         if (!ge_themeSchedule || !ge_themeSchedule.enabled) { _ge_themeTimer = null; return; }
+        ge_runCleanup('ThemeSchedule');
+        ge_runCleanup('ThemeSchedule');
         _ge_themeTimer = setTimeout(() => {
             ge_themeTick();
             ge_themeScheduleNext();
         }, ge_themeMsToNextBoundary());
+        ge_registerCleanup('ThemeSchedule', () => clearTimeout(_ge_themeTimer));
     }
     function ge_startThemeScheduler() {
         ge_themeTick(); // apply the correct theme immediately, don't wait for a boundary
@@ -1783,6 +1919,10 @@
                 _ge_themeObsDebounce = setTimeout(ge_themeTick, 50);
             });
             _ge_themeObs.observe(document.body, { childList: true, subtree: true });
+            ge_registerCleanup('ThemeSchedule', () => {
+                if (_ge_themeObs) { _ge_themeObs.disconnect(); _ge_themeObs = null; }
+                if (_ge_themeObsDebounce) { clearTimeout(_ge_themeObsDebounce); _ge_themeObsDebounce = null; }
+            });
         }
         // Backgrounded tabs (especially mobile) may sleep straight past a
         // boundary — catch up the moment the tab becomes visible again.
@@ -2359,7 +2499,10 @@
         }
         if (changed) rl_saveState();
     }
-    if (featureRateLimit) setInterval(rl_cleanupOldUsages, 60000);
+    if (featureRateLimit) {
+        const rl_cleanupInterval = setInterval(rl_cleanupOldUsages, 60000);
+        ge_registerCleanup('RateLimit', () => clearInterval(rl_cleanupInterval));
+    }
     function rl_getRemainingLocally(model, apiTotal, windowSize) {
         if (!rl_state[model]) rl_state[model] = JSON.parse(JSON.stringify(RL_STATE_DEFAULTS));
         if (apiTotal != null) rl_state[model].totalQueries = apiTotal;
@@ -2584,6 +2727,18 @@
         if (rl_composerObs) { rl_composerObs.disconnect(); rl_composerObs = null; }
         rl_isHidden = false;
     }
+
+    // Stop all rate-limit related timers and observers for cleanup.
+    function rl_stopAll() {
+        rl_stopOverlap();
+        if (rl_pollInterval) { clearInterval(rl_pollInterval); rl_pollInterval = null; }
+        if (rl_countdownTimer) { clearInterval(rl_countdownTimer); rl_countdownTimer = null; }
+        if (rl_lastBodyObs) { rl_lastBodyObs.disconnect(); rl_lastBodyObs = null; }
+        if (rl_lastModelObs) { rl_lastModelObs.disconnect(); rl_lastModelObs = null; }
+        if (rl_lastThinkObs) { rl_lastThinkObs.disconnect(); rl_lastThinkObs = null; }
+        if (rl_lastSearchObs) { rl_lastSearchObs.disconnect(); rl_lastSearchObs = null; }
+    }
+    ge_registerCleanup('RateLimit', rl_stopAll);
 
     function rl_removeExisting() { const e = document.getElementById(RL_CONTAINER_ID); if (e) e.remove(); }
 
@@ -3585,6 +3740,7 @@
 
     function ge_wuInit() {
         if (!featureWeeklyUsage) { ge_wuRemove(); return; }
+        ge_registerCleanup('WeeklyUsage', ge_wuStopListeners);
         ge_wuEnsureEl();
         ge_wuStartListeners();
         ge_wuScheduleReposition();
@@ -4024,6 +4180,8 @@
           onToggle: (on) => { featureHideCopy = on; ge_applyExtraCleanupCSS(); } },
         { label: 'Hide Thinking/Thoughts', get: () => featureHideThinking, stateKey: 'GrokEnhancer_HideThinking',
           onToggle: (on) => { featureHideThinking = on; ge_applyExtraCleanupCSS(); } },
+        { label: 'Hide Mini History Button', get: () => featureHideMiniHistory, stateKey: 'GrokEnhancer_HideMiniHistory',
+          onToggle: (on) => { featureHideMiniHistory = on; ge_applyExtraCleanupCSS(); } },
         { label: 'Hide Popups', get: () => featureHidePopups, stateKey: 'GrokEnhancer_HidePopups',
           onToggle: (on) => { featureHidePopups = on; ge_applyPopupHideCSS(on); } },
         { label: 'Hide Premium Upsells', get: () => featureHidePremium, stateKey: 'GrokEnhancer_HidePremium',
@@ -4239,18 +4397,12 @@
             }
             panelAddLog(`Hide Follow-up Prompts ${on ? 'ON' : 'OFF'}`);
         }).row;
-        const navHideRows = GE_SIDEBAR_NAV_HIDE_ITEMS.map(item => {
-            const stateKey = { build: 'GrokEnhancer_HideBuildNav', imagine: 'GrokEnhancer_HideImagineNav', skills: 'GrokEnhancer_HideSkillsNav', automations: 'GrokEnhancer_HideAutomationsNav' }[item.key];
-            return createToggle(`Hide ${item.label}`, item.get(), (on) => {
-                if (item.key === 'build') featureHideBuildNav = on;
-                else if (item.key === 'imagine') featureHideImagineNav = on;
-                else if (item.key === 'automations') featureHideAutomationsNav = on;
-                else featureHideSkillsNav = on;
-                setState(stateKey, on);
-                ge_scanSidebarNavHide();
-                panelAddLog(`Hide ${item.label} ${on ? 'ON' : 'OFF'}`);
-            }).row;
-        });
+        const navHideRows = GE_SIDEBAR_NAV_HIDE_ITEMS.map(item => createToggle(`Hide ${item.label}`, item.get(), (on) => {
+            item.set(on);
+            setState(item.storageKey, on);
+            ge_scanSidebarNavHide();
+            panelAddLog(`Hide ${item.label} ${on ? 'ON' : 'OFF'}`);
+        }).row);
         section.appendChild(createSection('UI Cleanup', [
             createSection('Chat & Composer', [
                 ge_buildSimpleToggleRow('Hide Composer Suggestions'),
@@ -4276,6 +4428,7 @@
                 ge_buildSimpleToggleRow('Hide More Options Button'),
                 ge_buildSimpleToggleRow('Hide Copy Button'),
                 ge_buildSimpleToggleRow('Hide Thinking/Thoughts'),
+                ge_buildSimpleToggleRow('Hide Mini History Button'),
             ]),
         ]));
 
@@ -4705,7 +4858,8 @@
         if (featureHideFollowups) ge_markFollowupContainers();
 
         // Hide sidebar nav items (Build / Imagine / Skills and Connectors / Automations)
-        if (featureHideBuildNav || featureHideImagineNav || featureHideSkillsNav || featureHideAutomationsNav) ge_scanSidebarNavHide();
+        // Hide sidebar nav items (Build / Imagine / Skills / Automations / Search / Projects) when any toggle is enabled
+        if (GE_SIDEBAR_NAV_HIDE_ITEMS.some(i => i.get())) ge_scanSidebarNavHide();
 
         // Privacy mode: scan only newly-added nodes, not the whole document
         if (featurePrivacyMode && privacyNodes.length) ge_scanPrivacySensitive(privacyNodes);
@@ -6617,6 +6771,7 @@
         if (featureHideMoreActions) rules.push('button[aria-label="More actions"] { display: none !important; }');
         if (featureHideCopy) rules.push('button[aria-label="Copy"] { display: none !important; }');
         if (featureHideThinking) rules.push('.thinking-container { display: none !important; }');
+        if (featureHideMiniHistory) rules.push('button[data-sidebar="menu-button"][aria-label="History"] { display: none !important; }');
         ge_applyToggleStyle('ge-extra-cleanup-css', rules.length > 0, rules.join('\n'));
     }
 
@@ -6673,6 +6828,12 @@
         document.head.appendChild(s);
     }
 
+    // Idempotency guard: any direct external call once init has actually run
+    // (body present + bootstrap work complete) is a no-op. The recursive
+    // self-call from the wait-until-body observer still works because the
+    // flag is set on the body-present branch, AFTER the wait observer has
+    // already set itself up on the body-missing branch.
+    let _geInitRan = false;
     function init() {
         if (!document.body) {
             const wait = new MutationObserver(() => {
@@ -6681,6 +6842,8 @@
             wait.observe(document.documentElement, { childList: true });
             return;
         }
+        if (_geInitRan) return;
+        _geInitRan = true;
         try { setupPanel(); } catch (e) { logError('[FAB] setupPanel failed:', e); }
         ge_applyExtraCleanupCSS();
         ge_applyPopupHideCSS(featureHidePopups);
@@ -6707,7 +6870,8 @@
         if (featureHideHeavy || featureHideExpert || featureHideAuto || featureHideFast) ge_markModelItems();
         if (featureHideHeavy) ge_markUpgradeHeavyBtns();
         if (featureHideFollowups) ge_markFollowupContainers();
-        if (featureHideBuildNav || featureHideImagineNav || featureHideSkillsNav || featureHideAutomationsNav) ge_scanSidebarNavHide();
+        // Hide sidebar nav items (Build / Imagine / Skills / Automations / Search / Projects) when any toggle is enabled
+        if (GE_SIDEBAR_NAV_HIDE_ITEMS.some(i => i.get())) ge_scanSidebarNavHide();
         if (featureHidePremium) {
             ge_dismissPremium();
             setTimeout(ge_dismissPremium, 1500); // catch late-rendered Upgrade button
@@ -6725,8 +6889,12 @@
                 if (Array.isArray(parsed)) ge_savePrompts(parsed.map(ge_normalizePrompt).filter(Boolean));
             }
         } catch (_) {}
-        console.log('[GrokEnhancer] Loaded v2.4.0 — Logo:', featureLogo, '| Links:', featureLinks, '| RateLimit:', featureRateLimit, '| WeeklyUsage:', featureWeeklyUsage, '| Debug:', featureDebug, '| HideShare:', featureHideShare, '| HidePostToX:', featureHidePostToX, '| HideLike:', featureHideLike, '| HideDislike:', featureHideDislike, '| HideRegenerate:', featureHideRegenerate, '| HideMoreActions:', featureHideMoreActions, '| HideCopy:', featureHideCopy, '| HideThinking:', featureHideThinking, '| HidePopups:', featureHidePopups, '| HidePremium:', featureHidePremium, '| HideComposerSuggestions:', featureHideComposerSuggestions, '| HideHeavy:', featureHideHeavy, '| HideExpert:', featureHideExpert, '| HideAuto:', featureHideAuto, '| HideFollowups:', featureHideFollowups, '| AutoPrivate:', featureAutoPrivate, '| PrivacyMode:', featurePrivacyMode, '| ImagineMenu:', featureImagineMenu, '| ThemeSchedule:', !!(ge_themeSchedule && ge_themeSchedule.enabled), '| Mobile:', GE_MOBILE);
+        console.log('[GrokEnhancer] Loaded v2.4.0 — Logo:', featureLogo, '| Links:', featureLinks, '| RateLimit:', featureRateLimit, '| WeeklyUsage:', featureWeeklyUsage, '| Debug:', featureDebug, '| HideShare:', featureHideShare, '| HidePostToX:', featureHidePostToX, '| HideLike:', featureHideLike, '| HideDislike:', featureHideDislike, '| HideRegenerate:', featureHideRegenerate, '| HideMoreActions:', featureHideMoreActions, '| HideCopy:', featureHideCopy, '| HideThinking:', featureHideThinking, '| HidePopups:', featureHidePopups, '| HidePremium:', featureHidePremium, '| HideComposerSuggestions:', featureHideComposerSuggestions, '| HideHeavy:', featureHideHeavy, '| HideExpert:', featureHideExpert, '| HideAuto:', featureHideAuto, '| HideFollowups:', featureHideFollowups, '| HideSearch:', featureHideSearchNav, '| HideProjects:', featureHideProjectsNav, '| AutoPrivate:', featureAutoPrivate, '| PrivacyMode:', featurePrivacyMode, '| ImagineMenu:', featureImagineMenu, '| ThemeSchedule:', !!(ge_themeSchedule && ge_themeSchedule.enabled), '| Mobile:', GE_MOBILE);
     }
+
+    window.addEventListener('pagehide', () => {
+        for (const [name] of _ge_cleanupRegistry) ge_runCleanup(name);
+    });
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
     else init();
