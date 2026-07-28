@@ -3,7 +3,7 @@
 **<p align="center"> The all-in-one Grok userscript that you could ever need! </p>**
 
 <p align="center">
-  <a href="https://github.com/Angel2mp3"><img src="https://img.shields.io/badge/Version-2.4.0-0D47A1?style=for-the-badge&logo=github&logoColor=white" alt="Version"/></a>
+  <a href="https://github.com/Angel2mp3"><img src="https://img.shields.io/badge/Version-2.4.5-0D47A1?style=for-the-badge&logo=github&logoColor=white" alt="Version"/></a>
   <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fuserscript-install-tracker.vercel.app%2Fapi%2Fbadge%3Frepo%3DGrokEnhancer&style=for-the-badge&color=4A148C" alt="Installs"/>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-424242?style=for-the-badge" alt="MIT License"/></a>
 </p>
